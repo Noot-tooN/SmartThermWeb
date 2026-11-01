@@ -1,0 +1,15 @@
+/target/
+/web/node_modules/
+/web/dist/
+.env
+.env.*
+!.env.example
+*.pcap
+*.pcapng
+*.har
+*.key
+*.pem
+captures/
+secrets/
+.DS_Store
+.codegraph/
