@@ -8,6 +8,9 @@ export class Dashboard {
   submitting = $state(false);
   streamConnected = $state(false);
   error = $state('');
+  loggingOut = $state(false);
+  logoutError = $state('');
+  authGeneration = $state(0);
   private edit = 0;
   private ready: { target: number; edit: number } | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -25,7 +28,7 @@ export class Dashboard {
       case undefined:
         return '';
       case 'authentication':
-        return 'Cloud login was rejected. Check the server credentials and restart the backend.';
+        return 'Your cloud session was rejected. Sign in again.';
       case 'device_not_found':
         return 'The configured thermostat was not returned by the cloud.';
       case 'invalid_response':
@@ -68,20 +71,68 @@ export class Dashboard {
       this.localPending = false;
     }
   }
+  useSession(next: Snapshot) {
+    this.authGeneration += 1;
+    this.retiredSessions.clear();
+    this.state = null;
+    this.optimistic = null;
+    this.localPending = false;
+    this.ready = null;
+    clearTimeout(this.timer);
+    this.accept(next);
+  }
+  sessionExpired() {
+    this.authGeneration += 1;
+    this.state = null;
+    this.optimistic = null;
+    this.localPending = false;
+    void this.refresh();
+  }
   async refresh() {
+    const generation = this.authGeneration;
     try {
-      const response = await this.request('/api/thermostat', {
+      const response = await this.request('/api/session', {
         signal: AbortSignal.timeout(8000),
         cache: 'no-store',
       });
       if (!response.ok)
         throw new Error('State could not be loaded. Try Refresh.');
-      this.accept(await response.json());
+      const next = await response.json();
+      if (this.disposed || generation !== this.authGeneration) return;
+      if (this.state && next.session !== this.state.session)
+        this.useSession(next);
+      else this.accept(next);
       if (this.optimistic === null) this.error = '';
     } catch {
-      if (!this.disposed)
+      if (!this.disposed && generation === this.authGeneration)
         this.error =
           'Cannot reach SmartThermWeb. Check the backend and try Refresh.';
+    }
+  }
+  async logout() {
+    if (
+      this.loggingOut ||
+      this.state?.provider !== 'ocstat' ||
+      this.state.login === 'signing_out'
+    )
+      return;
+    this.loggingOut = true;
+    this.logoutError = '';
+    try {
+      const response = await this.request('/api/logout', {
+        method: 'POST',
+        cache: 'no-store',
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!response.ok) throw new Error();
+      this.useSession(await response.json());
+      this.error = '';
+    } catch {
+      if (!this.disposed)
+        this.logoutError =
+          'Could not confirm logout. Refresh to check the connection, then try again.';
+    } finally {
+      this.loggingOut = false;
     }
   }
   change(delta: number) {

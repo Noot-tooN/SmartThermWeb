@@ -117,12 +117,24 @@ pub struct DeviceState {
     pub applied_command: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginState {
+    SigningOut,
+    Required,
+    SigningIn,
+    Failed,
+    Ready,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub session: String,
     pub revision: u64,
     pub provider: String,
     pub can_set_target: bool,
+    /// Present for OCSTAT, absent for the simulator; never contains credentials.
+    pub login: Option<LoginState>,
     pub read_error: Option<crate::provider::ProviderError>,
     pub connectivity: Connectivity,
     pub last_sync: Option<u64>,

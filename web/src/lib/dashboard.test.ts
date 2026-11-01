@@ -6,6 +6,7 @@ export const snapshot = (revision = 1): Snapshot => ({
   revision,
   provider: 'simulator',
   can_set_target: true,
+  login: null,
   read_error: null,
   connectivity: 'online',
   last_sync: 123,
@@ -173,4 +174,77 @@ it('cancels pending edits when the server changes to a read-only provider', asyn
   expect(request).not.toHaveBeenCalled();
   expect(dashboard.target).toBe(215);
   expect(dashboard.localPending).toBe(false);
+});
+
+it('logs out through the backend and does not accept an older account snapshot', async () => {
+  const request = vi.fn<typeof fetch>().mockResolvedValue(
+    response({
+      ...snapshot(3),
+      provider: 'ocstat',
+      can_set_target: false,
+      login: 'required',
+      confirmed: null,
+      desired: null,
+    }),
+  );
+  const { dashboard } = setup(request);
+  dashboard.accept({
+    ...snapshot(2),
+    provider: 'ocstat',
+    can_set_target: false,
+  });
+  await dashboard.logout();
+  expect(request).toHaveBeenCalledWith(
+    '/api/logout',
+    expect.objectContaining({ method: 'POST', cache: 'no-store' }),
+  );
+  dashboard.accept({ ...snapshot(2), provider: 'ocstat' });
+  expect(dashboard.state?.login).toBe('required');
+  expect(dashboard.state?.confirmed).toBeNull();
+  dashboard.accept({
+    ...snapshot(4),
+    provider: 'ocstat',
+    can_set_target: false,
+    login: 'required',
+    confirmed: null,
+    desired: null,
+  });
+  expect(dashboard.target).toBeNull();
+});
+
+it('ignores a refresh response from before login or logout', async () => {
+  let resolve!: (response: Response) => void;
+  const request = vi.fn<typeof fetch>().mockImplementation(
+    () =>
+      new Promise((r) => {
+        resolve = r;
+      }),
+  );
+  const { dashboard } = setup(request);
+  const old = dashboard.refresh();
+  dashboard.useSession({
+    ...snapshot(1),
+    session: 'signed-in',
+    provider: 'ocstat',
+    login: 'ready',
+    can_set_target: false,
+  });
+  resolve(
+    response({ ...snapshot(0), session: 'anonymous', login: 'required' }),
+  );
+  await old;
+  expect(dashboard.state?.session).toBe('signed-in');
+  const next = dashboard.refresh();
+  dashboard.useSession({
+    ...snapshot(0),
+    session: 'anonymous',
+    provider: 'ocstat',
+    login: 'required',
+    can_set_target: false,
+    confirmed: null,
+  });
+  resolve(response({ ...snapshot(99), session: 'signed-in', login: 'ready' }));
+  await next;
+  expect(dashboard.state?.login).toBe('required');
+  expect(dashboard.state?.confirmed).toBeNull();
 });

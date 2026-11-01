@@ -1,18 +1,21 @@
 use crate::{
     controller::{Controller, SubmitError},
-    domain::TargetTemperature,
+    domain::{LoginState, TargetTemperature},
     provider::simulator::{Config, Simulator},
+    sessions::{
+        BrowserSession, SessionError, Sessions, clear_cookie, cookie_token, session_cookie,
+    },
 };
 use axum::{
     Json, Router,
     body::Body,
-    extract::{State, rejection::JsonRejection},
-    http::{StatusCode, Uri, header},
+    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
+    http::{HeaderMap, StatusCode, Uri, header},
     response::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -22,6 +25,7 @@ use std::{convert::Infallible, sync::Arc};
 pub struct AppState {
     pub controller: Controller,
     pub simulator: Option<Arc<Simulator>>,
+    pub sessions: Option<Arc<Sessions>>,
 }
 #[derive(rust_embed::RustEmbed)]
 #[folder = "$SMARTTHERM_ASSETS"]
@@ -29,6 +33,12 @@ struct Assets;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route(
+            "/api/login",
+            post(login).layer(DefaultBodyLimit::max(16_384)),
+        )
+        .route("/api/logout", post(logout))
+        .route("/api/session", get(session_status))
         .route("/api/thermostat", get(snapshot))
         .route("/api/thermostat/target", put(set_target))
         .route("/api/events", get(events))
@@ -47,10 +57,70 @@ pub enum ApiError {
     TooManyClients,
     ReadOnly,
     NotSimulator,
+    LoginUnavailable,
+    LoginRateLimited,
+    InvalidLogin,
+    InvalidOrigin,
+    LogoutUnavailable,
+    Unauthenticated,
+    CloudLoginFailed,
+    CloudUnavailable,
+    MultipleDevices,
+    NoDevice,
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
+            Self::Unauthenticated => (
+                StatusCode::UNAUTHORIZED,
+                "unauthenticated",
+                "Sign in with your OCSTAT account.".into(),
+            ),
+            Self::CloudLoginFailed => (
+                StatusCode::UNAUTHORIZED,
+                "authentication",
+                "OCSTAT did not accept the email or password.".into(),
+            ),
+            Self::CloudUnavailable => (
+                StatusCode::BAD_GATEWAY,
+                "cloud_unavailable",
+                "Could not connect to OCSTAT. Try again.".into(),
+            ),
+            Self::MultipleDevices => (
+                StatusCode::CONFLICT,
+                "multiple_devices",
+                "Multiple-device selection is not supported yet.".into(),
+            ),
+            Self::NoDevice => (
+                StatusCode::NOT_FOUND,
+                "device_not_found",
+                "No thermostat was returned for this account.".into(),
+            ),
+            Self::LogoutUnavailable => (
+                StatusCode::CONFLICT,
+                "logout_unavailable",
+                "Logout is available only for the OCSTAT provider.".into(),
+            ),
+            Self::InvalidOrigin => (
+                StatusCode::FORBIDDEN,
+                "invalid_origin",
+                "Use the local SmartThermWeb page for account actions.".into(),
+            ),
+            Self::InvalidLogin => (
+                StatusCode::BAD_REQUEST,
+                "invalid_login",
+                "Provide an email and password, each at most 1024 bytes.".into(),
+            ),
+            Self::LoginUnavailable => (
+                StatusCode::CONFLICT,
+                "login_unavailable",
+                "You are already signed in, or login is unavailable for this provider.".into(),
+            ),
+            Self::LoginRateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "login_rate_limited",
+                "Wait 10 seconds before trying to sign in again.".into(),
+            ),
             Self::ReadOnly => (
                 StatusCode::FORBIDDEN,
                 "read_only",
@@ -76,16 +146,144 @@ impl IntoResponse for ApiError {
         };
         (
             status,
+            [(header::CACHE_CONTROL, "no-store")],
             Json(json!({"error": {"code": code, "message": message}})),
         )
             .into_response()
     }
 }
-async fn snapshot(State(state): State<AppState>) -> impl IntoResponse {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+fn local_same_origin(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<Uri>().ok())
+    else {
+        return false;
+    };
+    matches!(origin.scheme_str(), Some("http" | "https"))
+        && origin.authority().is_some_and(|a| a.as_str() == host)
+        && origin.path() == "/"
+        && origin.query().is_none()
+        && matches!(origin.host(), Some("127.0.0.1" | "localhost" | "[::1]"))
+}
+async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<LoginRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !local_same_origin(&headers) {
+        return Err(ApiError::InvalidOrigin);
+    }
+    // Never echo JSON extractor errors: they can include user-supplied values.
+    let Json(body) = body.map_err(|_| ApiError::InvalidLogin)?;
+    let email = body.email.trim().to_owned();
+    if email.is_empty()
+        || body.password.trim().is_empty()
+        || email.len() > 1024
+        || body.password.len() > 1024
+    {
+        return Err(ApiError::InvalidLogin);
+    }
+    let sessions = state.sessions.as_ref().ok_or(ApiError::LoginUnavailable)?;
+    let old_token = cookie_token(&headers);
+    if old_token
+        .as_deref()
+        .and_then(|token| sessions.get(token))
+        .is_some_and(|entry| entry.controller.snapshot().login == Some(LoginState::Ready))
+    {
+        return Err(ApiError::LoginUnavailable);
+    }
+    let (token, snapshot) =
+        sessions
+            .login(email, body.password)
+            .await
+            .map_err(|error| match error {
+                SessionError::RateLimited | SessionError::Capacity => ApiError::LoginRateLimited,
+                SessionError::Login(crate::provider::ProviderError::Authentication) => {
+                    ApiError::CloudLoginFailed
+                }
+                SessionError::Login(crate::provider::ProviderError::MultipleDevices) => {
+                    ApiError::MultipleDevices
+                }
+                SessionError::Login(crate::provider::ProviderError::DeviceNotFound) => {
+                    ApiError::NoDevice
+                }
+                _ => ApiError::CloudUnavailable,
+            })?;
+    if let Some(old) = old_token {
+        sessions.logout(&old);
+    }
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CACHE_CONTROL, "no-store".to_owned()),
+            (header::SET_COOKIE, session_cookie(&token)),
+        ],
+        Json(snapshot),
+    ))
+}
+async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    if !local_same_origin(&headers) {
+        return Err(ApiError::InvalidOrigin);
+    }
+    let sessions = state.sessions.as_ref().ok_or(ApiError::LogoutUnavailable)?;
+    if let Some(token) = cookie_token(&headers) {
+        sessions.logout(&token);
+    }
+    Ok((
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::SET_COOKIE, clear_cookie()),
+        ],
+        Json(state.controller.snapshot()),
+    ))
+}
+fn browser_session(state: &AppState, headers: &HeaderMap) -> Option<Arc<BrowserSession>> {
+    let sessions = state.sessions.as_ref()?;
+    sessions.get(&cookie_token(headers)?)
+}
+async fn session_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(session) = browser_session(&state, &headers) {
+        return (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(session.controller.snapshot()),
+        )
+            .into_response();
+    }
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(state.controller.snapshot()),
     )
+        .into_response()
+}
+async fn snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let controller = if state.sessions.is_some() {
+        browser_session(&state, &headers)
+            .ok_or(ApiError::Unauthenticated)?
+            .controller
+            .clone()
+    } else {
+        state.controller
+    };
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(controller.snapshot()),
+    ))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -117,6 +315,9 @@ async fn set_target(
                     SubmitError::StaleRevision => ApiError::StaleRevision,
                     SubmitError::TooManyClients => ApiError::TooManyClients,
                     SubmitError::ReadOnly => ApiError::ReadOnly,
+                    SubmitError::LoginUnavailable => ApiError::LoginUnavailable,
+                    SubmitError::LoginRateLimited => ApiError::LoginRateLimited,
+                    SubmitError::LogoutUnavailable => ApiError::LogoutUnavailable,
                 })?
         }
         _ => {
@@ -157,33 +358,58 @@ async fn configure_simulator(
     simulator.configure(config.clone());
     Ok(Json(config))
 }
-async fn events(State(state): State<AppState>) -> impl IntoResponse {
-    // Subscribe BEFORE snapshot to close the initial-read/subscription race.
-    let mut receiver = state.controller.subscribe();
-    let controller = state.controller;
+async fn events(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
+    let browser = browser_session(&state, &headers);
+    if state.sessions.is_some() && browser.is_none() {
+        return Err(ApiError::Unauthenticated);
+    }
+    let controller = browser
+        .as_ref()
+        .map(|session| session.controller.clone())
+        .unwrap_or(state.controller);
+    let mut receiver = controller.subscribe();
+    // A sender retained in the stream keeps the simulator's cancellation channel open.
+    let (fallback_sender, fallback_receiver) = tokio::sync::watch::channel(false);
+    let mut revoked = browser
+        .as_ref()
+        .map(|session| session.revoked.subscribe())
+        .unwrap_or(fallback_receiver);
     let stream = async_stream::stream! {
+        let _fallback_sender = fallback_sender;
+        let _browser = browser;
+        if *revoked.borrow() { return; }
         let first = controller.snapshot();
         let mut revision = first.revision;
         yield Ok::<_, Infallible>(event(&first));
         loop {
-            let state = match receiver.recv().await {
-                Ok(state) => state,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => controller.snapshot(),
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            };
-            if state.revision > revision {
-                revision = state.revision;
-                yield Ok(event(&state));
+            tokio::select! {
+                _ = revoked.changed() => {
+                    yield Ok(Event::default().event("signed_out").data("{}"));
+                    break;
+                }
+                update = receiver.recv() => {
+                    if *revoked.borrow() {
+                        yield Ok(Event::default().event("signed_out").data("{}"));
+                        break;
+                    }
+                    let state = match update {
+                        Ok(state) => state,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => controller.snapshot(),
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    };
+                    if state.revision > revision { revision = state.revision; yield Ok(event(&state)); }
+                }
             }
         }
     };
-    (
+    Ok((
         [
             (header::CACHE_CONTROL, "no-store"),
             (header::HeaderName::from_static("x-accel-buffering"), "no"),
         ],
         Sse::new(stream).keep_alive(KeepAlive::default()),
     )
+        .into_response())
 }
 fn event(snapshot: &crate::domain::Snapshot) -> Event {
     Event::default()

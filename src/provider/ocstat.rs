@@ -2,63 +2,11 @@
 use super::{Provider, ProviderError, ProviderFuture};
 use crate::domain::{DeviceState, Mode, TargetTemperature, Temperature};
 use serde::Deserialize;
-use std::{fs::File, io::Read, path::Path, time::Duration};
-use tokio::{sync::Mutex, time::Instant};
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 const ORIGIN: &str = "https://www.ocstat-thermostat.com";
 const MAX_RESPONSE: usize = 1024 * 1024;
-
-/// Server-only provisioning. Deliberately neither Debug nor Serialize.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Credentials {
-    email: String,
-    password: String,
-    userid_phoneid: String,
-    device_id: String,
-}
-impl Credentials {
-    pub fn from_file(path: &Path) -> Result<Self, &'static str> {
-        let file = File::open(path).map_err(|_| "Cannot open OCSTAT credential file.")?;
-        let metadata = file
-            .metadata()
-            .map_err(|_| "Cannot inspect OCSTAT credential file.")?;
-        if !metadata.is_file() || metadata.len() > 16_384 {
-            return Err("OCSTAT credentials must be a regular file of at most 16 KiB.");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o077 != 0 {
-                return Err("OCSTAT credential file must have owner-only permissions (chmod 600).");
-            }
-        }
-        let mut bytes = Vec::new();
-        file.take(16_385)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "Cannot read OCSTAT credential file.")?;
-        if bytes.len() > 16_384 {
-            return Err("OCSTAT credential file is too large.");
-        }
-        let credentials: Self = serde_json::from_slice(&bytes).map_err(|_| "Invalid OCSTAT credential file; expected email, password, userid_phoneid, device_id.")?;
-        credentials.validate()?;
-        Ok(credentials)
-    }
-    fn validate(&self) -> Result<(), &'static str> {
-        if [
-            &self.email,
-            &self.password,
-            &self.userid_phoneid,
-            &self.device_id,
-        ]
-        .iter()
-        .any(|s| s.trim().is_empty() || s.len() > 1024)
-        {
-            return Err("OCSTAT credential fields must be nonempty and at most 1024 bytes.");
-        }
-        Ok(())
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Endpoint {
@@ -175,7 +123,7 @@ fn decode_login(body: &[u8]) -> Result<Session, ProviderError> {
 }
 fn decode_device(
     body: &[u8],
-    device_id: &str,
+    device_id: Option<&str>,
     revision: u64,
 ) -> Result<DeviceState, ProviderError> {
     let response: ListResponse =
@@ -188,7 +136,12 @@ fn decode_device(
         return Err(ProviderError::InvalidResponse);
     }
     let devices = response.devices.ok_or(ProviderError::InvalidResponse)?;
-    let mut matches = devices.into_iter().filter(|d| d.device_id == device_id);
+    if device_id.is_none() && devices.len() > 1 {
+        return Err(ProviderError::MultipleDevices);
+    }
+    let mut matches = devices
+        .into_iter()
+        .filter(|d| device_id.is_none_or(|id| d.device_id == id));
     let device = matches.next().ok_or(ProviderError::DeviceNotFound)?;
     if matches.next().is_some() {
         return Err(ProviderError::InvalidResponse);
@@ -209,89 +162,93 @@ fn decode_device(
 }
 struct AuthState {
     session: Option<Session>,
-    login_after: Instant,
-    auth_blocked: bool,
+    device_id: Option<String>,
     revision: u64,
 }
-/// No Debug implementation: credentials and the session token never enter logs/API.
+/// No Debug implementation: the session token never enters logs/API.
+/// Email/password are transient login inputs, never stored in this provider.
 pub struct Ocstat {
-    credentials: Credentials,
     transport: Box<dyn Transport>,
     auth: Mutex<AuthState>,
 }
 impl Ocstat {
-    pub fn new(credentials: Credentials) -> Result<Self, reqwest::Error> {
-        Ok(Self::with_transport(credentials, Box::new(Https::new()?)))
+    pub fn new() -> Result<Self, reqwest::Error> {
+        Ok(Self::with_transport(Box::new(Https::new()?)))
     }
-    fn with_transport(credentials: Credentials, transport: Box<dyn Transport>) -> Self {
+    fn with_transport(transport: Box<dyn Transport>) -> Self {
         Self {
-            credentials,
             transport,
             auth: Mutex::new(AuthState {
                 session: None,
-                login_after: Instant::now(),
-                auth_blocked: false,
+                device_id: None,
                 revision: 0,
             }),
         }
     }
     async fn read_device(&self) -> Result<DeviceState, ProviderError> {
         let mut auth = self.auth.lock().await;
-        if auth.auth_blocked {
-            return Err(ProviderError::Authentication);
-        }
-        if auth.session.is_none() {
-            if Instant::now() < auth.login_after {
-                return Err(ProviderError::Transport);
-            }
-            // Set before awaiting so timeouts/cancellation cannot cause a login storm.
-            auth.login_after = Instant::now() + Duration::from_secs(60);
-            let login = self
-                .transport
-                .post(
-                    Endpoint::Login,
-                    vec![
-                        ("email", self.credentials.email.clone()),
-                        ("password", self.credentials.password.clone()),
-                    ],
-                )
-                .await
-                .and_then(|body| decode_login(&body));
-            match login {
-                Ok(session) => auth.session = Some(session),
-                Err(error) => {
-                    auth.auth_blocked = error == ProviderError::Authentication;
-                    return Err(error);
-                }
-            }
-        }
-        let session = auth.session.as_ref().ok_or(ProviderError::Authentication)?;
-        let body = self
-            .transport
-            .post(
-                Endpoint::DeviceList,
-                vec![
-                    ("userid_phoneid", self.credentials.userid_phoneid.clone()),
-                    ("user_id", session.id.to_string()),
-                    ("token", session.token.clone()),
-                    ("pageNum", "1".into()),
-                    ("pageSize", "12".into()),
-                    ("online", "1".into()),
-                    ("device_type", "1".into()),
-                ],
-            )
-            .await;
+        let session = auth.session.as_ref().ok_or(ProviderError::LoginRequired)?;
+        let form = vec![
+            ("user_id", session.id.to_string()),
+            ("token", session.token.clone()),
+            ("pageNum", "1".into()),
+            ("pageSize", "12".into()),
+            ("online", "1".into()),
+            ("device_type", "1".into()),
+        ];
+        let body = self.transport.post(Endpoint::DeviceList, form).await;
         if matches!(body, Err(ProviderError::Authentication)) {
             auth.session = None;
-            // No speculative refresh or repeated password login on unknown expiry semantics.
-            auth.auth_blocked = true;
+            auth.device_id = None;
         }
-        let observed = decode_device(&body?, &self.credentials.device_id, auth.revision + 1)?;
+        let body = body?;
+        let observed = decode_device(&body, auth.device_id.as_deref(), auth.revision + 1)?;
+        if auth.device_id.is_none() {
+            // Pin only a uniquely discovered device; do not switch accounts/devices on later polls.
+            let list: ListResponse =
+                serde_json::from_slice(&body).map_err(|_| ProviderError::InvalidResponse)?;
+            auth.device_id = Some(
+                list.devices
+                    .and_then(|items| items.into_iter().next())
+                    .ok_or(ProviderError::DeviceNotFound)?
+                    .device_id,
+            );
+        }
         auth.revision += 1;
         Ok(observed)
     }
 }
 impl Provider for Ocstat {
+    fn logout(&self) -> super::LogoutFuture<'_> {
+        Box::pin(async move {
+            let mut auth = self.auth.lock().await;
+            auth.session = None;
+            auth.device_id = None;
+        })
+    }
+    fn login(&self, email: String, password: String) -> ProviderFuture<'_, DeviceState> {
+        Box::pin(async move {
+            self.logout().await;
+            if [&email, &password]
+                .iter()
+                .any(|value| value.trim().is_empty() || value.len() > 1024)
+            {
+                return Err(ProviderError::Authentication);
+            }
+            // Move the only credential strings into this one request. No password
+            // is retained for polling, refresh, retries, or subsequent server starts.
+            let body = self
+                .transport
+                .post(
+                    Endpoint::Login,
+                    vec![("email", email), ("password", password)],
+                )
+                .await?;
+            let session = decode_login(&body)?;
+            self.auth.lock().await.session = Some(session);
+            self.read_device().await
+        })
+    }
     fn read(&self) -> ProviderFuture<'_, DeviceState> {
         Box::pin(self.read_device())
     }
@@ -309,13 +266,10 @@ mod tests {
     };
     const LOGIN: &[u8] = br#"{"statu":true,"error_code":0,"user":{"id":7,"token":"TEST_TOKEN_ONLY","smartPwd":"IGNORED_SECRET"}}"#;
     const LIST: &[u8] = br#"{"statu":true,"error_code":1,"devices":[{"device_id":"OTHER_DEVICE"},{"device_id":"TEST_DEVICE","online":true,"current_temprature":"215","inside_temparature":"211","password":"IGNORED_SECRET","work_mode":"1"}]}"#;
-    fn credentials() -> Credentials {
-        Credentials {
-            email: "example@example.invalid".into(),
-            password: "TEST_PASSWORD_ONLY".into(),
-            userid_phoneid: "TEST_CLIENT".into(),
-            device_id: "TEST_DEVICE".into(),
-        }
+    fn single() -> Vec<u8> {
+        let mut value: serde_json::Value = serde_json::from_slice(LIST).unwrap();
+        value["devices"].as_array_mut().unwrap().remove(0);
+        serde_json::to_vec(&value).unwrap()
     }
     #[derive(Default)]
     struct Fake {
@@ -339,32 +293,39 @@ mod tests {
             replies: StdMutex::new(replies.into()),
             ..Fake::default()
         });
-        (
-            Ocstat::with_transport(credentials(), Box::new(fake.clone())),
-            fake,
-        )
+        (Ocstat::with_transport(Box::new(fake.clone())), fake)
+    }
+    async fn login(provider: &Ocstat) -> Result<DeviceState, ProviderError> {
+        provider
+            .login(
+                "example@example.invalid".into(),
+                "TEST_PASSWORD_ONLY".into(),
+            )
+            .await
     }
     #[tokio::test]
-    async fn login_once_reuse_token_and_return_only_safe_status() {
-        let (provider, fake) = fixture(vec![
-            Ok(LOGIN.to_vec()),
-            Ok(LIST.to_vec()),
-            Ok(LIST.to_vec()),
-        ]);
-        let first = provider.read().await.unwrap();
+    async fn reads_before_browser_login_never_contact_upstream() {
+        let (provider, fake) = fixture(vec![]);
+        for _ in 0..3 {
+            assert_eq!(provider.read().await, Err(ProviderError::LoginRequired));
+        }
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn explicit_login_discovers_and_pins_device_then_reuses_only_token() {
+        let (provider, fake) = fixture(vec![Ok(LOGIN.to_vec()), Ok(single()), Ok(LIST.to_vec())]);
+        let first = login(&provider).await.unwrap();
         let second = provider.read().await.unwrap();
         assert_eq!(first.target_temperature, Temperature(215));
         assert_eq!(first.room_temperature, Temperature(211));
-        assert!(first.online);
-        assert!(first.applied_command.is_none());
-        assert!(matches!(first.mode, Mode::Unknown(_)));
         assert_eq!(second.revision, first.revision + 1);
+        assert!(second.applied_command.is_none());
         let json = serde_json::to_string(&second).unwrap();
         for secret in [
             "TEST_TOKEN_ONLY",
             "IGNORED_SECRET",
             "TEST_DEVICE",
-            "TEST_CLIENT",
+            "TEST_PASSWORD_ONLY",
             "example@example.invalid",
         ] {
             assert!(!json.contains(secret));
@@ -376,13 +337,55 @@ mod tests {
         );
         for (_, form) in &calls[1..] {
             assert!(form.contains(&("token", "TEST_TOKEN_ONLY".into())));
-            assert!(form.contains(&("user_id", "7".into())));
             assert!(
                 !form
                     .iter()
-                    .any(|(name, _)| matches!(*name, "password" | "email"))
+                    .any(|(key, _)| matches!(*key, "email" | "password" | "userid_phoneid"))
             );
         }
+    }
+    #[tokio::test]
+    async fn rejected_or_failed_login_is_never_retried_by_reads() {
+        for failure in [
+            Ok(br#"{"statu":false,"error_code":-1}"#.to_vec()),
+            Err(ProviderError::Transport),
+        ] {
+            let (provider, fake) = fixture(vec![failure, Ok(LOGIN.to_vec()), Ok(single())]);
+            assert!(login(&provider).await.is_err());
+            for _ in 0..3 {
+                assert_eq!(provider.read().await, Err(ProviderError::LoginRequired));
+            }
+            assert_eq!(fake.calls.lock().unwrap().len(), 1);
+            assert!(login(&provider).await.is_ok()); // Only a new explicit submission retries.
+        }
+    }
+    #[tokio::test]
+    async fn read_failures_do_not_trigger_password_login_and_rejection_clears_token() {
+        let (provider, fake) = fixture(vec![
+            Ok(LOGIN.to_vec()),
+            Ok(single()),
+            Err(ProviderError::Transport),
+            Ok(single()),
+            Err(ProviderError::Authentication),
+        ]);
+        assert!(login(&provider).await.is_ok());
+        assert_eq!(provider.read().await, Err(ProviderError::Transport));
+        assert!(provider.read().await.is_ok());
+        assert_eq!(provider.read().await, Err(ProviderError::Authentication));
+        assert_eq!(provider.read().await, Err(ProviderError::LoginRequired));
+        assert_eq!(fake.calls.lock().unwrap().len(), 5);
+    }
+    #[tokio::test]
+    async fn logout_and_new_process_both_require_browser_login() {
+        let (provider, fake) = fixture(vec![Ok(LOGIN.to_vec()), Ok(single())]);
+        assert!(login(&provider).await.is_ok());
+        provider.logout().await;
+        assert_eq!(provider.read().await, Err(ProviderError::LoginRequired));
+        assert_eq!(fake.calls.lock().unwrap().len(), 2);
+        let auth = provider.auth.lock().await;
+        assert!(auth.session.is_none() && auth.device_id.is_none());
+        let fresh = Ocstat::with_transport(Box::new(fake.clone()));
+        assert_eq!(fresh.read().await, Err(ProviderError::LoginRequired));
     }
     #[tokio::test]
     async fn writes_never_contact_upstream() {
@@ -393,41 +396,16 @@ mod tests {
         );
         assert!(fake.calls.lock().unwrap().is_empty());
     }
-    #[tokio::test(start_paused = true)]
-    async fn rejected_credentials_stop_until_restart() {
-        let (provider, fake) = fixture(vec![Ok(br#"{"statu":false,"error_code":-1}"#.to_vec())]);
-        for _ in 0..3 {
-            assert_eq!(provider.read().await, Err(ProviderError::Authentication));
-            tokio::time::advance(Duration::from_secs(120)).await;
-        }
-        assert_eq!(fake.calls.lock().unwrap().len(), 1);
-    }
-    #[tokio::test(start_paused = true)]
-    async fn transport_failure_has_login_cooldown_but_can_recover() {
-        let (provider, fake) = fixture(vec![
-            Err(ProviderError::Transport),
-            Ok(LOGIN.to_vec()),
-            Ok(LIST.to_vec()),
-        ]);
-        assert_eq!(provider.read().await, Err(ProviderError::Transport));
-        assert_eq!(provider.read().await, Err(ProviderError::Transport));
-        assert_eq!(fake.calls.lock().unwrap().len(), 1);
-        tokio::time::advance(Duration::from_secs(60)).await;
-        assert!(provider.read().await.is_ok());
-    }
-    #[tokio::test]
-    async fn read_failure_does_not_trigger_password_login_and_auth_failure_stops() {
-        let (provider, fake) = fixture(vec![
-            Ok(LOGIN.to_vec()),
-            Err(ProviderError::Transport),
-            Ok(LIST.to_vec()),
-            Err(ProviderError::Authentication),
-        ]);
-        assert_eq!(provider.read().await, Err(ProviderError::Transport));
-        assert!(provider.read().await.is_ok());
-        assert_eq!(provider.read().await, Err(ProviderError::Authentication));
-        assert_eq!(provider.read().await, Err(ProviderError::Authentication));
-        assert_eq!(fake.calls.lock().unwrap().len(), 4);
+    #[test]
+    fn discovery_never_guesses_between_multiple_devices() {
+        assert_eq!(
+            decode_device(LIST, None, 1),
+            Err(ProviderError::MultipleDevices)
+        );
+        assert_eq!(
+            decode_device(br#"{"statu":true,"error_code":1,"devices":[]}"#, None, 1),
+            Err(ProviderError::DeviceNotFound)
+        );
     }
     #[test]
     fn decoders_fail_closed_without_leaking_response_data() {
@@ -438,33 +416,34 @@ mod tests {
             br#"{"statu":true,"error_code":0,"user":{"id":7,"token":""}}"#,
         ] {
             assert!(decode_login(body).is_err());
-            assert!(decode_device(body, "TEST_DEVICE", 1).is_err());
+            assert!(decode_device(body, Some("TEST_DEVICE"), 1).is_err());
         }
         assert_eq!(
-            decode_device(LIST, "MISSING", 1),
+            decode_device(LIST, Some("MISSING"), 1),
             Err(ProviderError::DeviceNotFound)
         );
         let mut value: serde_json::Value = serde_json::from_slice(LIST).unwrap();
         value["error_code"] = 0.into();
         assert_eq!(
-            decode_device(&serde_json::to_vec(&value).unwrap(), "TEST_DEVICE", 1),
+            decode_device(&serde_json::to_vec(&value).unwrap(), Some("TEST_DEVICE"), 1),
             Err(ProviderError::InvalidResponse)
         );
         value["error_code"] = 1.into();
         value["devices"][1]["current_temprature"] = "21.5".into();
         assert_eq!(
-            decode_device(&serde_json::to_vec(&value).unwrap(), "TEST_DEVICE", 1),
+            decode_device(&serde_json::to_vec(&value).unwrap(), Some("TEST_DEVICE"), 1),
             Err(ProviderError::InvalidResponse)
         );
         value["devices"][1]["current_temprature"] = "321".into();
         value["devices"][1]["online"] = false.into();
-        let device = decode_device(&serde_json::to_vec(&value).unwrap(), "TEST_DEVICE", 1).unwrap();
+        let device =
+            decode_device(&serde_json::to_vec(&value).unwrap(), Some("TEST_DEVICE"), 1).unwrap();
         assert_eq!(device.target_temperature, Temperature(321)); // Not constrained to simulator limits.
         assert!(!device.online);
         let duplicate = value["devices"][1].clone();
         value["devices"].as_array_mut().unwrap().push(duplicate);
         assert_eq!(
-            decode_device(&serde_json::to_vec(&value).unwrap(), "TEST_DEVICE", 1),
+            decode_device(&serde_json::to_vec(&value).unwrap(), Some("TEST_DEVICE"), 1),
             Err(ProviderError::InvalidResponse)
         );
     }
@@ -485,30 +464,5 @@ mod tests {
                     .starts_with("https://www.ocstat-thermostat.com/ocstat/")
             );
         }
-    }
-    #[test]
-    #[cfg(unix)]
-    fn credentials_require_private_file_and_errors_are_sanitized() {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let path = std::env::temp_dir().join(format!(
-            "smarttherm-test-credentials-{}",
-            std::process::id()
-        ));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .unwrap();
-        file.write_all(br#"{"email":"example@example.invalid","password":"TEST_PASSWORD_ONLY","userid_phoneid":"TEST_CLIENT","device_id":"TEST_DEVICE"}"#).unwrap();
-        assert!(Credentials::from_file(&path).is_ok());
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(Credentials::from_file(&path).is_err());
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        std::fs::write(&path, "TEST_PASSWORD_ONLY invalid JSON").unwrap();
-        let error = Credentials::from_file(&path).err().unwrap();
-        assert!(!error.contains("TEST_PASSWORD_ONLY"));
-        std::fs::remove_file(path).unwrap();
     }
 }

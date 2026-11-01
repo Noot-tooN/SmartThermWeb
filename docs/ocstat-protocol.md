@@ -53,7 +53,9 @@ Next: collect longer session/status evidence using [the capture analysis](captur
 
 `src/provider/ocstat.rs` now implements the explicitly authorized HTTPS login and read-only device-list integration. Its production transport has a fixed HTTPS origin, only two endpoint variants (`login`, `getDeviceListNew`), certificate verification, disabled redirects, 10-second request timeouts, and a 1 MiB response cap. Raw upstream responses and credential-like extra fields are not exposed or logged.
 
-The backend reads a restricted server-side credential file and caches the login token only in memory. It polls every 30 seconds, selects the configured device ID, validates endpoint-specific response schemas/success codes, and preserves unknown mode semantics. Login transport retries are limited to once per 60 seconds; explicit authentication rejection stops until restart. No expiry or refresh flow is invented.
+The backend now supports browser-initiated login/logout only. Every server start is signed out, regardless of old credential files or environment settings. The worker uses submitted email/password for a single HTTPS exchange, then retains only the token and selected device in memory. Polling uses that token every 30 seconds; no automatic login or password retry exists. Explicit authentication rejection returns to the login form. No expiry or refresh flow is invented.
+
+The dated verification records below describe earlier implementation stages; file-provisioning behavior recorded there has since been removed.
 
 The executable accepts `SMARTTHERM_PROVIDER=ocstat` in **read-only** mode. API/controller submissions fail closed; `send_target` always returns `ReadOnly` without network access. The UI disables controls and hides command progress. No write endpoint or TCP 8800 integration exists. Local API access remains restricted to loopback.
 
@@ -82,3 +84,25 @@ Do not commit raw PCAP/PCAPNG/HAR files, unsanitized payloads, tokens, passwords
 The release executable was checked against the account using the private server-side credential file. Its initial worker login and device-list read succeeded over HTTPS. The API reported OCSTAT, `can_set_target: false`, online status, target 215 and room 213 (integer tenths), with null desired/command/application-correlation fields. No credential-file values appeared in the snapshot. No manufacturer write request was made.
 
 Automated validation passed: 26 Rust tests and 27 frontend tests; Clippy, Rust/Prettier formatting and Svelte/TypeScript checks; the embedded release build; and the standalone simulator smoke test (SSE lifecycle, lost replies and reconnect). Tests cover token reuse, authentication rejection, login retry cooldown, malformed payloads, exact device selection, unrestricted observed temperatures, HTTP refusal, private-file permissions, preserved readings on cloud failure, API/controller/provider write rejection, and disabled browser controls. Browser automation was unavailable; the live frontend was served successfully, with UI behavior verified in component tests.
+
+## Browser setup evidence — 2026-11-01
+
+A narrowly scoped HTTPS device-list probe omitted `userid_phoneid` while retaining the captured token and verified list parameters. It returned HTTP 200, `statu: true`, `error_code: 1`, and the same single device as the capture. Thus that identifier is optional for the tested read-only list flow; this says nothing about write or TCP registration requirements. Browser login submits email/password to the worker, then lists devices without inventing an Android client identifier. Exactly one device is discovered and pinned; ambiguous discovery fails closed.
+
+A fresh release process with no credential file was then tested through the local `/api/login` route using the private captured credentials. Snapshot state progressed from `required` to `signing_in` to `ready`; real HTTPS login/listing succeeded and the thermostat was online. The process did not create a credential file, snapshots contained no credential-file values, and temperature writes stayed disabled. This validates the same backend route used by the browser form; UI behavior is covered separately by component tests.
+
+Browser-login validation passed 32 Rust tests and 30 frontend tests, Clippy and type checks, and the embedded release build. No real thermostat write request was sent.
+
+## Local logout verification — 2026-11-01
+
+A separate release process loaded the existing private credential file, read the thermostat, accepted local logout, and returned to browser login with readings cleared. Browser re-login then succeeded over HTTPS. The credential file was unchanged byte-for-byte; no manufacturer logout or thermostat-write request was sent. Local logout forgets credentials/token but does not claim remote token revocation. Automated checks passed 36 Rust tests and 33 frontend tests, including suppression of in-flight read/login results after logout, canceled pending credentials, cross-site rejection, preserved retry cooldown, and logout button behavior.
+
+## Browser-only authentication revision
+
+Credential-file loading and automatic sign-in have been removed. OCSTAT starts in `login: required` on every process start, and the old configuration-file environment variable is ignored. The provider holds no email/password field; only a token, account ID, pinned device ID, and local observation revision survive successful login. Login rejection and transport failure require another explicit browser submission. Logout clears the token/device and does not touch the old private file.
+
+The release binary was started twice, once with the old credential-file environment setting pointing to the existing private file and once without it. Both fresh processes served `login: required`, no readings, no cloud error, and disabled writes. No credentials were submitted in this startup check. Validation passed 34 Rust tests, 33 frontend tests, Clippy, Svelte/TypeScript and formatting checks, and the embedded release build.
+
+## Per-browser session revision
+
+The login form still uses only existing OCSTAT email/password; no local account system exists. A successful HTTPS login/read now issues an opaque HttpOnly browser session cookie, with isolated provider/controller state per session. Logout invalidates that cookie session and stops its worker without affecting other browser sessions. Session expiry is a local 12-hour policy, not an assertion about OCSTAT token expiry. File loading and automatic sign-in remain removed; temperature writes remain disabled.

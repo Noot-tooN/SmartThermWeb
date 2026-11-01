@@ -9,6 +9,7 @@ const initial: Snapshot = {
   revision: 1,
   provider: 'simulator',
   can_set_target: true,
+  login: null,
   read_error: null,
   connectivity: 'online',
   last_sync: 123,

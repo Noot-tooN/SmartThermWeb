@@ -19,6 +19,7 @@ export interface Snapshot {
   revision: number;
   provider: string;
   can_set_target: boolean;
+  login: 'signing_out' | 'required' | 'signing_in' | 'failed' | 'ready' | null;
   read_error: string | null;
   connectivity: 'connecting' | 'online' | 'offline' | 'unavailable';
   last_sync: number | null;

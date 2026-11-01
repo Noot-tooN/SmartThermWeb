@@ -17,12 +17,18 @@ struct Core {
     next_id: u64,
     pending: Option<Command>,
     clients: HashMap<String, u64>,
+    pending_login: Option<(String, String)>,
+    pending_logout: bool,
+    next_login: Instant,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum SubmitError {
     StaleRevision,
     TooManyClients,
     ReadOnly,
+    LoginUnavailable,
+    LoginRateLimited,
+    LogoutUnavailable,
 }
 #[derive(Clone)]
 pub struct Controller {
@@ -50,7 +56,9 @@ impl Controller {
         Self::configured("simulator", true)
     }
     pub fn ocstat_read_only() -> Self {
-        Self::configured("ocstat", false)
+        let controller = Self::configured("ocstat", false);
+        controller.core.lock().unwrap().state.login = Some(LoginState::Required);
+        controller
     }
     fn configured(provider: &str, can_set_target: bool) -> Self {
         let (events, _) = broadcast::channel(64);
@@ -69,6 +77,7 @@ impl Controller {
                     revision: 0,
                     provider: provider.into(),
                     can_set_target,
+                    login: None,
                     read_error: None,
                     connectivity: Connectivity::Connecting,
                     last_sync: None,
@@ -80,6 +89,9 @@ impl Controller {
                 next_id: 0,
                 pending: None,
                 clients: HashMap::new(),
+                pending_login: None,
+                pending_logout: false,
+                next_login: Instant::now(),
             })),
             events,
             wake: Arc::new(Notify::new()),
@@ -94,6 +106,97 @@ impl Controller {
     fn publish(&self, core: &mut Core) {
         core.state.revision += 1;
         let _ = self.events.send(core.state.clone());
+    }
+    pub fn submit_logout(&self) -> Result<Snapshot, SubmitError> {
+        let mut core = self.core.lock().unwrap();
+        if core.state.provider != "ocstat" {
+            return Err(SubmitError::LogoutUnavailable);
+        }
+        if core.pending_logout {
+            return Ok(core.state.clone());
+        }
+        core.pending_logout = true;
+        core.pending_login = None;
+        core.pending = None;
+        core.state.login = Some(LoginState::SigningOut);
+        core.state.confirmed = None;
+        core.state.desired = None;
+        core.state.command = None;
+        core.state.in_flight = None;
+        core.state.last_sync = None;
+        core.state.read_error = None;
+        core.state.connectivity = Connectivity::Connecting;
+        self.publish(&mut core);
+        self.wake.notify_one();
+        Ok(core.state.clone())
+    }
+    fn logout_requested(&self) -> bool {
+        self.core.lock().unwrap().pending_logout
+    }
+    async fn execute_logout(&self, provider: &dyn Provider) {
+        provider.logout().await;
+        let mut core = self.core.lock().unwrap();
+        core.pending_logout = false;
+        core.state.login = Some(LoginState::Required);
+        // Keep any outstanding login cooldown; logout must not bypass rate limits.
+        self.publish(&mut core);
+    }
+    pub fn submit_login(&self, email: String, password: String) -> Result<Snapshot, SubmitError> {
+        let mut core = self.core.lock().unwrap();
+        if !matches!(
+            core.state.login,
+            Some(LoginState::Required | LoginState::Failed)
+        ) {
+            return Err(SubmitError::LoginUnavailable);
+        }
+        if Instant::now() < core.next_login {
+            return Err(SubmitError::LoginRateLimited);
+        }
+        core.next_login = Instant::now() + Duration::from_secs(10);
+        core.pending_login = Some((email, password));
+        core.state.login = Some(LoginState::SigningIn);
+        core.state.read_error = None;
+        core.state.connectivity = Connectivity::Connecting;
+        self.publish(&mut core);
+        self.wake.notify_one();
+        Ok(core.state.clone())
+    }
+    fn take_login(&self) -> Option<(String, String)> {
+        self.core.lock().unwrap().pending_login.take()
+    }
+    async fn execute_login(
+        &self,
+        provider: &dyn Provider,
+        email: String,
+        password: String,
+        timing: Timing,
+    ) {
+        match timeout(timing.request, provider.login(email, password)).await {
+            Ok(Ok(observed)) => {
+                {
+                    let mut core = self.core.lock().unwrap();
+                    if core.pending_logout {
+                        return;
+                    }
+                    core.state.login = Some(LoginState::Ready);
+                }
+                self.observe(observed);
+            }
+            result => {
+                {
+                    let mut core = self.core.lock().unwrap();
+                    if core.pending_logout {
+                        return;
+                    }
+                    core.state.login = Some(LoginState::Failed);
+                }
+                let error = match result {
+                    Ok(Err(error)) => error,
+                    _ => ProviderError::Transport,
+                };
+                self.read_failed(error);
+            }
+        }
     }
     pub fn submit(&self, target: TargetTemperature) -> Result<Snapshot, SubmitError> {
         let mut core = self.core.lock().unwrap();
@@ -182,6 +285,9 @@ impl Controller {
     }
     fn observe(&self, observed: DeviceState) {
         let mut core = self.core.lock().unwrap();
+        if core.pending_logout {
+            return;
+        }
         if core
             .state
             .confirmed
@@ -217,6 +323,14 @@ impl Controller {
     }
     fn read_failed(&self, error: ProviderError) {
         let mut core = self.core.lock().unwrap();
+        if core.pending_logout {
+            return;
+        }
+        if error == ProviderError::Authentication && core.state.login == Some(LoginState::Ready) {
+            core.state.login = Some(LoginState::Failed);
+            core.state.confirmed = None;
+            core.state.last_sync = None;
+        }
         let connectivity = if error == ProviderError::Offline {
             Connectivity::Offline
         } else {
@@ -229,6 +343,17 @@ impl Controller {
         }
     }
     async fn sync(&self, provider: &dyn Provider, timing: Timing) {
+        if matches!(
+            self.snapshot().login,
+            Some(
+                LoginState::Required
+                    | LoginState::SigningIn
+                    | LoginState::SigningOut
+                    | LoginState::Failed
+            )
+        ) {
+            return;
+        }
         match timeout(timing.request, provider.read()).await {
             Ok(Ok(state)) => self.observe(state),
             Ok(Err(error)) => self.read_failed(error),
@@ -239,7 +364,12 @@ impl Controller {
     pub async fn run(self, provider: Arc<dyn Provider>, timing: Timing) {
         self.sync(provider.as_ref(), timing).await;
         loop {
-            if let Some(command) = self.take_pending() {
+            if self.logout_requested() {
+                self.execute_logout(provider.as_ref()).await;
+            } else if let Some((email, password)) = self.take_login() {
+                self.execute_login(provider.as_ref(), email, password, timing)
+                    .await;
+            } else if let Some(command) = self.take_pending() {
                 self.execute(provider.as_ref(), command, timing).await;
             } else {
                 tokio::select! {
@@ -339,6 +469,193 @@ mod tests {
             room_temperature: Temperature(208),
             mode: Mode::Manual,
         }
+    }
+    struct SlowAccount {
+        started: Notify,
+        release: Notify,
+        reads: std::sync::atomic::AtomicUsize,
+        cleared: std::sync::atomic::AtomicBool,
+    }
+    impl Provider for SlowAccount {
+        fn login(&self, _: String, _: String) -> crate::provider::ProviderFuture<'_, DeviceState> {
+            self.read()
+        }
+        fn read(&self) -> crate::provider::ProviderFuture<'_, DeviceState> {
+            Box::pin(async {
+                self.reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(observation(1, None, 215))
+            })
+        }
+        fn logout(&self) -> crate::provider::LogoutFuture<'_> {
+            Box::pin(async {
+                self.cleared
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+        }
+        fn send_target(
+            &self,
+            _: u64,
+            _: TargetTemperature,
+        ) -> crate::provider::ProviderFuture<'_, ()> {
+            panic!("logout must not write")
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn logout_discards_in_flight_reads_and_logins_and_stops_polling() {
+        for browser in [false, true] {
+            let c = Controller::ocstat_read_only();
+            if !browser {
+                c.core.lock().unwrap().state.login = Some(LoginState::Ready);
+            }
+            let provider = Arc::new(SlowAccount {
+                started: Notify::new(),
+                release: Notify::new(),
+                reads: 0.into(),
+                cleared: false.into(),
+            });
+            let mut events = c.subscribe();
+            if browser {
+                c.submit_login(
+                    "example@example.invalid".into(),
+                    "TEST_PASSWORD_ONLY".into(),
+                )
+                .unwrap();
+            }
+            let worker = tokio::spawn(c.clone().run(provider.clone(), Timing::default()));
+            provider.started.notified().await;
+            let logged_out = c.submit_logout().unwrap();
+            assert_eq!(logged_out.login, Some(LoginState::SigningOut));
+            assert!(logged_out.confirmed.is_none());
+            assert!(c.submit_login("x".into(), "x".into()).is_err());
+            provider.release.notify_one();
+            loop {
+                let state = events.recv().await.unwrap();
+                if state.revision < logged_out.revision {
+                    continue;
+                }
+                assert!(state.confirmed.is_none() && state.last_sync.is_none());
+                assert_ne!(state.login, Some(LoginState::Ready));
+                if state.login == Some(LoginState::Required) {
+                    break;
+                }
+            }
+            assert!(provider.cleared.load(std::sync::atomic::Ordering::Relaxed));
+            tokio::time::advance(Duration::from_secs(30)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(provider.reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert!(
+                c.submit_login(
+                    "example@example.invalid".into(),
+                    "TEST_PASSWORD_ONLY".into()
+                )
+                .is_ok()
+            );
+            worker.abort();
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn logout_drops_pending_credentials_without_bypassing_login_cooldown() {
+        let c = Controller::ocstat_read_only();
+        c.submit_login(
+            "example@example.invalid".into(),
+            "TEST_PASSWORD_ONLY".into(),
+        )
+        .unwrap();
+        c.submit_logout().unwrap();
+        assert!(c.take_login().is_none());
+        c.execute_logout(&Simulator::new(Config::default())).await;
+        assert!(matches!(
+            c.submit_login("x".into(), "x".into()),
+            Err(SubmitError::LoginRateLimited)
+        ));
+        assert!(Controller::new().submit_logout().is_err());
+    }
+    struct LoginProvider {
+        succeed: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl Provider for LoginProvider {
+        fn login(
+            &self,
+            _email: String,
+            _password: String,
+        ) -> crate::provider::ProviderFuture<'_, DeviceState> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async move {
+                if self.succeed {
+                    Ok(observation(1, None, 215))
+                } else {
+                    Err(ProviderError::Authentication)
+                }
+            })
+        }
+        fn read(&self) -> crate::provider::ProviderFuture<'_, DeviceState> {
+            Box::pin(async { Ok(observation(2, None, 215)) })
+        }
+        fn send_target(
+            &self,
+            _: u64,
+            _: TargetTemperature,
+        ) -> crate::provider::ProviderFuture<'_, ()> {
+            panic!("browser login must not write")
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn only_worker_performs_queued_login_and_publishes_safe_read_only_state() {
+        let c = Controller::ocstat_read_only();
+        let provider = Arc::new(LoginProvider {
+            succeed: true,
+            calls: 0.into(),
+        });
+        let mut events = c.subscribe();
+        let queued = c
+            .submit_login(
+                "example@example.invalid".into(),
+                "TEST_PASSWORD_ONLY".into(),
+            )
+            .unwrap();
+        assert_eq!(queued.login, Some(LoginState::SigningIn));
+        let json = serde_json::to_string(&queued).unwrap();
+        assert!(!json.contains("TEST_PASSWORD_ONLY") && !json.contains("example@example.invalid"));
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let worker = tokio::spawn(c.clone().run(provider.clone(), Timing::default()));
+        while events.recv().await.unwrap().login != Some(LoginState::Ready) {}
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(!c.snapshot().can_set_target);
+        assert!(c.snapshot().confirmed.is_some());
+        assert!(c.submit_login("other".into(), "other".into()).is_err());
+        assert!(c.submit(target(220)).is_err());
+        worker.abort();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn failed_browser_login_can_be_retried_only_after_cooldown() {
+        let c = Controller::ocstat_read_only();
+        let provider = LoginProvider {
+            succeed: false,
+            calls: 0.into(),
+        };
+        c.submit_login(
+            "example@example.invalid".into(),
+            "TEST_PASSWORD_ONLY".into(),
+        )
+        .unwrap();
+        let (email, password) = c.take_login().unwrap();
+        c.execute_login(&provider, email, password, Timing::default())
+            .await;
+        assert_eq!(c.snapshot().login, Some(LoginState::Failed));
+        assert_eq!(c.snapshot().read_error, Some(ProviderError::Authentication));
+        assert!(matches!(
+            c.submit_login("x".into(), "x".into()),
+            Err(SubmitError::LoginRateLimited)
+        ));
+        c.sync(&provider, Timing::default()).await;
+        assert_eq!(c.snapshot().login, Some(LoginState::Failed));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(c.submit_login("x".into(), "x".into()).is_ok());
     }
     #[test]
     fn read_only_observations_follow_cloud_and_preserve_last_read_on_errors() {

@@ -1,13 +1,16 @@
 # HTTP API
 
-Same origin, JSON. All temperatures are integer tenths of °C. Errors use `{"error":{"code":"...","message":"..."}}`. The unauthenticated MVP is restricted to loopback.
+Same origin, JSON. All temperatures are integer tenths of °C. Errors use `{"error":{"code":"...","message":"..."}}`. The local build is restricted to loopback. OCSTAT device data requires a browser session; the explicit simulator mode is unauthenticated.
 
 | Method | Path | Behavior |
 | --- | --- | --- |
+| POST | `/api/logout` | Invalidate this browser session and clear its cookie; HTTP 200, same-origin required |
+| POST | `/api/login` | Authenticate OCSTAT credentials, read device, issue session cookie; HTTP 200 on success |
+| GET | `/api/session` | Current browser session snapshot or empty signed-out snapshot; no cloud calls |
 | GET | `/api/health` | Process health and provider name, not device connectivity |
-| GET | `/api/thermostat` | Current full snapshot, `Cache-Control: no-store` |
+| GET | `/api/thermostat` | Current full snapshot, `Cache-Control: no-store`; OCSTAT requires cookie (401 otherwise) |
 | PUT | `/api/thermostat/target` | Simulator: validate and queue desired target, HTTP 202. OCSTAT: HTTP 403 `read_only` |
-| GET | `/api/events` | SSE `state` events containing full snapshots; initial snapshot on each connection |
+| GET | `/api/events` | SSE `state` events; OCSTAT requires cookie (401 otherwise); revocation/expiry emits `signed_out` then closes |
 | GET / PUT | `/api/simulator` | Read/change simulator scenario and latencies; HTTP 404 in OCSTAT mode |
 
 ## Temperature request
@@ -39,3 +42,19 @@ Snapshots add `can_set_target` and `read_error`. OCSTAT always advertises `can_s
 `connectivity` is `connecting`, `online`, `offline`, or `unavailable`. The latter means the backend could not obtain usable status, not that the thermostat is known offline. `read_error` is null on a successful read or a sanitized enum such as `authentication`, `transport`, `invalid_response`, `device_not_found`, or `rejected`. Upstream messages, credentials, tokens and account/device identifiers are never included. Failed reads retain the previous observation and `last_sync`; successful reads update `last_sync` to the cloud retrieval time, not physical measurement time.
 
 The health response reports the active provider and `can_set_target`; it does not claim cloud connectivity. Snapshot GET/Refresh never makes an extra upstream call. The worker owns all reads and polls OCSTAT every 30 seconds.
+
+## OCSTAT browser login
+
+There are no local accounts or separate credentials. Every process starts signed out. POST `/api/login` with the existing OCSTAT `email` and `password`. The route requires matching loopback Host/Origin, accepts at most 16 KiB and 1024 bytes per credential, and never echoes submitted values. The controller worker performs HTTPS login and the first device read. HTTP 200 means both succeeded; the body contains `login: "ready"`. Invalid credentials return 401 `authentication`; cloud failure 502, no device 404, and multiple devices 409. Failure never issues a session cookie.
+
+Success sets a random 256-bit `smarttherm_session` cookie with Path=/, HttpOnly, SameSite=Strict and Max-Age=43200. Secure is omitted for the enforced loopback HTTP listener. This opaque identifier is distinct from the OCSTAT token and the public snapshot `session` revision identifier. It never appears in JSON. Passwords are transient; only the OCSTAT token/account/device and session mapping remain in memory. Browser refresh keeps the session; 12-hour expiry or server restart requires login again. No file or environment credential loading exists.
+
+Each session owns independent provider/controller/worker state. `/api/thermostat` and `/api/events` reject missing/invalid cookies with 401. `/api/session` is the public bootstrap route: valid cookies return that browser's snapshot; otherwise it returns only signed-out state. All state and account responses use `Cache-Control: no-store`.
+
+One login may run at a time, with a global 10-second cooldown and 32-session limit (429). A browser already signed in must log out before replacing its account (409). Authentication rejection during polling clears readings and displays login again; other read failures preserve the last observation. OCSTAT writes remain forbidden regardless of session state.
+
+## Logout
+
+POST `/api/logout` requires the same Host/Origin checks and uses the browser cookie. It invalidates only that session, clears the cookie, aborts its polling worker, and returns HTTP 200 with an empty `login: "required"` snapshot. Existing streams for that session emit `signed_out` and close. A late read cannot recreate the removed session. Missing/stale cookies can also be cleared safely.
+
+Tabs sharing the cookie are signed out together; other browser sessions remain independent. No manufacturer logout request is sent and no cloud token revocation is claimed. Credential files are never read or written, including on restart.
