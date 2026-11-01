@@ -120,125 +120,143 @@
       ></a
     >
     <div class="header-actions">
-      <span class="demo-badge"
-        >{dashboard.state?.provider === 'ocstat'
-          ? 'READ ONLY'
-          : dashboard.state?.provider === 'simulator'
-            ? 'SIMULATOR'
-            : 'CONNECTING'}</span
-      >
-      <AccountActions {dashboard} />
+      {#if dashboard.state}
+        <span class="demo-badge"
+          >{dashboard.state?.provider === 'ocstat'
+            ? 'READ ONLY'
+            : 'SIMULATOR'}</span
+        >
+        <AccountActions {dashboard} />
+      {/if}
     </div>
   </header>
-  {#if dashboard.logoutError}<p class="error" role="alert">
-      {dashboard.logoutError}
-    </p>{/if}
-  {#if dashboard.state?.login === 'signing_out'}
-    <section class="thermostat"><p role="status">Logging out…</p></section>
-  {:else if dashboard.state?.login && dashboard.state.login !== 'ready'}
-    <Login {dashboard} />
-    <div class="sync-row">
-      <button class="text-button" onclick={() => dashboard.refresh()}
-        >Refresh</button
-      >
-    </div>
-  {:else}
-    <div class="connection-row">
-      <span
-        class:online={dashboard.state?.connectivity === 'online'}
-        class="connection"
-        ><i></i>{dashboard.state?.connectivity === 'online'
-          ? dashboard.state?.provider === 'ocstat'
-            ? 'Cloud reports device online'
-            : 'Device online'
-          : dashboard.state?.connectivity === 'offline'
-            ? 'Device offline'
-            : dashboard.state?.connectivity === 'unavailable'
-              ? 'Device status unavailable'
-              : 'Connecting to device'}</span
-      ><span class="muted"
-        >{dashboard.streamConnected
-          ? 'Live updates connected'
-          : 'Live updates reconnecting…'}</span
-      >
-    </div>
-    <Thermostat {dashboard} />
-    <div class="sync-row">
-      <span
-        >{dashboard.state?.provider === 'ocstat'
-          ? 'Last cloud read'
-          : 'Last synchronized'}: {dashboard.state?.last_sync
-          ? new Date(dashboard.state.last_sync * 1000).toLocaleTimeString()
-          : 'Waiting for a reading'}</span
-      ><button class="text-button" onclick={() => dashboard.refresh()}
-        >Refresh</button
-      >
-    </div>
-    {#if dashboard.state?.provider === 'simulator'}
-      <details class="simulator-panel">
-        <summary
-          >Try a slow connection or a failure<span aria-hidden="true">+</span
-          ></summary
+  {#if !dashboard.state}
+    <section
+      class="page-status"
+      aria-label="Session status"
+      aria-busy={!dashboard.error}
+    >
+      {#if dashboard.error}
+        <p class="error" role="alert">{dashboard.error}</p>
+        <button
+          class="text-button"
+          onclick={() => {
+            dashboard.error = '';
+            void dashboard.refresh();
+          }}>Try again</button
         >
-        <p class="muted">
-          This is a simulated thermostat. No commands are sent to your heating
-          system.
+      {:else}
+        <p class="muted loading-message" role="status">
+          Loading SmartThermWeb…
         </p>
-        <form onsubmit={configure}>
-          <label
-            >Behavior<select bind:value={scenario}
-              ><option value="normal">Normal operation</option><option
-                value="rejected">Server rejects the command</option
-              ><option value="transport_failure"
-                >Connection fails before application</option
-              ><option value="reply_lost"
-                >Reply lost, device still applies</option
-              ><option value="ack_timeout"
-                >Reply times out, device still applies</option
-              ><option value="device_timeout"
-                >Server accepts, device never applies</option
-              ><option value="offline">Device offline</option></select
-            ></label
+      {/if}
+    </section>
+  {:else}
+    {#if dashboard.logoutError}<p class="error" role="alert">
+        {dashboard.logoutError}
+      </p>{/if}
+    {#if dashboard.state?.login === 'signing_out'}
+      <section class="thermostat"><p role="status">Logging out…</p></section>
+    {:else if dashboard.state?.login && dashboard.state.login !== 'ready'}
+      <Login {dashboard} />
+    {:else}
+      <div class="connection-row">
+        <span
+          class:online={dashboard.state?.connectivity === 'online'}
+          class="connection"
+          ><i></i>{dashboard.state?.connectivity === 'online'
+            ? dashboard.state?.provider === 'ocstat'
+              ? 'Cloud reports device online'
+              : 'Device online'
+            : dashboard.state?.connectivity === 'offline'
+              ? 'Device offline'
+              : dashboard.state?.connectivity === 'unavailable'
+                ? 'Device status unavailable'
+                : 'Connecting to device'}</span
+        ><span class="muted"
+          >{dashboard.streamConnected
+            ? 'Live updates connected'
+            : 'Live updates reconnecting…'}</span
+        >
+      </div>
+      <Thermostat {dashboard} />
+      <div class="sync-row">
+        <span
+          >{dashboard.state?.provider === 'ocstat'
+            ? 'Last cloud read'
+            : 'Last synchronized'}: {dashboard.state?.last_sync
+            ? new Date(dashboard.state.last_sync * 1000).toLocaleTimeString()
+            : 'Waiting for a reading'}</span
+        ><button class="text-button" onclick={() => dashboard.refresh()}
+          >Refresh</button
+        >
+      </div>
+      {#if dashboard.state?.provider === 'simulator'}
+        <details class="simulator-panel">
+          <summary
+            >Try a slow connection or a failure<span aria-hidden="true">+</span
+            ></summary
           >
-          <div class="timing-fields">
+          <p class="muted">
+            This is a simulated thermostat. No commands are sent to your heating
+            system.
+          </p>
+          <form onsubmit={configure}>
             <label
-              >Server reply delay (ms)<input
-                type="number"
-                bind:value={ackMs}
-                min="0"
-                max="30000"
-                step="100"
-                required
-              /></label
-            ><label
-              >Device applies after (ms)<input
-                type="number"
-                bind:value={applyMs}
-                min="0"
-                max="60000"
-                step="100"
-                required
-              /></label
+              >Behavior<select bind:value={scenario}
+                ><option value="normal">Normal operation</option><option
+                  value="rejected">Server rejects the command</option
+                ><option value="transport_failure"
+                  >Connection fails before application</option
+                ><option value="reply_lost"
+                  >Reply lost, device still applies</option
+                ><option value="ack_timeout"
+                  >Reply times out, device still applies</option
+                ><option value="device_timeout"
+                  >Server accepts, device never applies</option
+                ><option value="offline">Device offline</option></select
+              ></label
             >
-          </div>
-          <button
-            class="apply-button"
-            type="submit"
-            disabled={simSaving || !simLoaded}
-            >{simSaving ? 'Applying…' : 'Apply simulator settings'}</button
-          >
-          {#if simError}<p class="error" role="alert">
-              {simError}
-            </p>{/if}{#if simMessage}<p class="muted" role="status">
-              {simMessage}
-            </p>{/if}
-        </form>
-      </details>
+            <div class="timing-fields">
+              <label
+                >Server reply delay (ms)<input
+                  type="number"
+                  bind:value={ackMs}
+                  min="0"
+                  max="30000"
+                  step="100"
+                  required
+                /></label
+              ><label
+                >Device applies after (ms)<input
+                  type="number"
+                  bind:value={applyMs}
+                  min="0"
+                  max="60000"
+                  step="100"
+                  required
+                /></label
+              >
+            </div>
+            <button
+              class="apply-button"
+              type="submit"
+              disabled={simSaving || !simLoaded}
+              >{simSaving ? 'Applying…' : 'Apply simulator settings'}</button
+            >
+            {#if simError}<p class="error" role="alert">
+                {simError}
+              </p>{/if}{#if simMessage}<p class="muted" role="status">
+                {simMessage}
+              </p>{/if}
+          </form>
+        </details>
+      {/if}
     {/if}
+    <footer>
+      SmartThermWeb <span aria-hidden="true">·</span> Local control. Clear feedback.
+    </footer>
   {/if}
-  <footer>
-    SmartThermWeb <span aria-hidden="true">·</span> Local control. Clear feedback.
-  </footer>
 </main>
 
 <style>
@@ -246,5 +264,28 @@
     display: flex;
     align-items: center;
     gap: 16px;
+    min-height: 44px;
+  }
+  .page-status {
+    position: absolute;
+    inset: 160px 24px auto;
+    text-align: center;
+    font-size: 13px;
+  }
+  .loading-message {
+    animation: reveal-loading 150ms ease-out 300ms both;
+  }
+  @keyframes reveal-loading {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @media (max-width: 480px) {
+    .header-actions {
+      justify-content: flex-end;
+    }
   }
 </style>

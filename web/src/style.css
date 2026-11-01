@@ -18,6 +18,9 @@
   --warning: #82541c;
   --warning-bg: #fff2dc;
 }
+html {
+  scrollbar-gutter: stable both-edges;
+}
 * {
   box-sizing: border-box;
 }
@@ -53,11 +56,13 @@ summary:focus-visible {
   outline-offset: 4px;
 }
 main {
+  position: relative;
   max-width: 800px;
   margin: 0 auto;
   padding: 36px 24px;
 }
 header {
+  min-height: 44px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -80,6 +85,7 @@ header {
   margin-right: 9px;
 }
 .demo-badge {
+  white-space: nowrap;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 1.8px;
@@ -96,7 +102,17 @@ header {
   gap: 16px;
 }
 .connection-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  min-height: 2.8em;
+  line-height: 1.4;
   margin: 0 4px 16px;
+}
+.connection-row > .muted {
+  justify-self: end;
+  width: 28ch;
+  max-width: 100%;
 }
 .connection {
   display: flex;
@@ -104,6 +120,7 @@ header {
   gap: 7px;
 }
 .connection i {
+  flex-shrink: 0;
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -408,5 +425,14 @@ footer span {
   }
   .thermostat {
     padding: 24px 18px;
+  }
+}
+
+/* Reserve both header rows on phones before account actions are known. */
+@media (max-width: 480px) {
+  header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
   }
 }
