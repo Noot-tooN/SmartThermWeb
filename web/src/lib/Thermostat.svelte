@@ -12,7 +12,11 @@
       <p class="eyebrow">YOUR HOME</p>
       <h1 id="room-title">A little more comfortable.</h1>
     </div>
-    <span class="mode">{confirmed?.mode.kind ?? 'Connecting'}</span>
+    <span class="mode"
+      >{confirmed?.mode.kind === 'unknown'
+        ? 'Mode unavailable'
+        : (confirmed?.mode.kind ?? 'Connecting')}</span
+    >
   </div>
   <div class="temperature-layout">
     <div class="ambient">
@@ -24,19 +28,26 @@
       </p>
       <span class="muted"
         >{dashboard.state?.connectivity === 'online'
-          ? 'Latest device reading'
+          ? dashboard.state?.provider === 'ocstat'
+            ? 'Cloud-reported reading'
+            : 'Latest device reading'
           : 'Last known reading'}</span
       >
     </div>
     <div class="setpoint">
-      <span class="label">Desired temperature</span>
+      <span class="label"
+        >{dashboard.canSetTarget
+          ? 'Desired temperature'
+          : 'Reported target'}</span
+      >
       <div class="controls">
         <button
           class="step"
           aria-label="Decrease target temperature by 0.5 degrees"
           onclick={() => dashboard.change(-5)}
-          disabled={dashboard.target === null || dashboard.target <= 50}
-          >−</button
+          disabled={!dashboard.canSetTarget ||
+            dashboard.target === null ||
+            dashboard.target <= 50}>−</button
         >
         <output aria-label="Desired target temperature" aria-live="polite"
           ><strong>{temperature(dashboard.target)}</strong><span>°C</span
@@ -46,14 +57,27 @@
           class="step"
           aria-label="Increase target temperature by 0.5 degrees"
           onclick={() => dashboard.change(5)}
-          disabled={dashboard.target === null || dashboard.target >= 300}
-          >+</button
+          disabled={!dashboard.canSetTarget ||
+            dashboard.target === null ||
+            dashboard.target >= 300}>+</button
         >
       </div>
       <p class="muted">
-        0.5°C per step <span aria-hidden="true">·</span> 5–30°C range
+        {#if dashboard.canSetTarget}
+          0.5°C per step <span aria-hidden="true">·</span> 5–30°C range
+        {:else}Read-only · Temperature changes are disabled{/if}
       </p>
     </div>
   </div>
-  <CommandProgress {dashboard} />
+  {#if dashboard.canSetTarget}
+    <CommandProgress {dashboard} />
+  {:else}
+    <p class="muted">Cloud readings may lag behind the thermostat.</p>
+    {#if dashboard.error}<p class="error" role="alert">
+        {dashboard.error}
+      </p>{/if}
+  {/if}
+  {#if dashboard.readError}<p class="error" role="status">
+      {dashboard.readError}
+    </p>{/if}
 </section>

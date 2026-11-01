@@ -7,12 +7,17 @@ use std::{future::Future, pin::Pin};
 pub type ProviderFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ProviderError>> + Send + 'a>>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderError {
     Offline,
     Rejected,
     Transport,
     UnverifiedProtocol,
+    Authentication,
+    InvalidResponse,
+    DeviceNotFound,
+    ReadOnly,
 }
 
 /// Returning Ok from send_target means cloud acceptance, never device application.

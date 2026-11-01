@@ -39,4 +39,10 @@ The EventSource reconnects automatically. Every connection begins with a current
 
 Assets are copied into OUT_DIR at compile time and embedded in debug/release builds. Cargo-only development builds use a generated landing page when frontend assets do not exist; the production make target requires them. Unknown API routes return JSON 404 rather than HTML.
 
-OCSTAT cannot send network traffic in this MVP. The binary rejects any provider setting other than simulator and non-loopback bind addresses. Authentication and secure remote access are deferred, so do not tunnel or proxy this unauthenticated service to other users. No secrets, captures, telemetry, or remote fonts are included.
+OCSTAT can log in and read the device list over a fixed HTTPS origin with certificate verification and no redirects. Its private server-side credential file is loaded at startup; tokens live only in memory. One serialized worker polls every 30 seconds. Authentication rejection stops further authenticated requests until restart; transient login attempts are limited to once a minute. No write endpoint or TCP 8800 transport exists.
+
+The snapshot advertises `can_set_target: false` for OCSTAT. The API rejects target writes, the controller refuses to queue them, and the provider always rejects `send_target`. Read-only snapshots have no desired target or command; the UI follows the latest observed target. Cloud failures preserve the last reading and expose only a typed sanitized error. `unavailable` means a read failed, distinct from a successful cloud report of device `offline`.
+
+For OCSTAT, observation revisions order local completed reads, not device changes, and `applied_command` is always absent. Observed target temperatures use unrestricted integer tenths rather than simulator write validation. Unknown mode values are not mapped speculatively. The UI labels cloud observations explicitly and does not show a full device-confirmation bar.
+
+The binary rejects non-loopback bind addresses. Browser authentication and secure remote access remain deferred, so do not tunnel or proxy this unauthenticated service to other users. No secrets, captures, telemetry, or remote fonts are included in the build.

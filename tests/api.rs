@@ -15,7 +15,7 @@ fn app() -> (axum::Router, Controller) {
     (
         router(AppState {
             controller: controller.clone(),
-            simulator: Arc::new(Simulator::new(Config::default())),
+            simulator: Some(Arc::new(Simulator::new(Config::default()))),
         }),
         controller,
     )
@@ -113,7 +113,9 @@ async fn sse_initial_snapshot_lag_recovery_and_reconnection() {
     let initial = body.frame().await.unwrap().unwrap().into_data().unwrap();
     assert!(String::from_utf8_lossy(&initial).contains("event: state"));
     for i in 0..100 {
-        controller.submit((200 + (i % 10) * 5).try_into().unwrap());
+        controller
+            .submit((200 + (i % 10) * 5).try_into().unwrap())
+            .unwrap();
     }
     let latest = body.frame().await.unwrap().unwrap().into_data().unwrap();
     assert!(String::from_utf8_lossy(&latest).contains(r#""revision":100"#));
@@ -154,4 +156,63 @@ async fn simulator_configuration_is_validated() {
             expected
         );
     }
+}
+
+#[tokio::test]
+async fn ocstat_is_read_only_at_api_and_controller_boundaries() {
+    let controller = Controller::ocstat_read_only();
+    let app = router(AppState {
+        controller: controller.clone(),
+        simulator: None,
+    });
+    for body in [
+        r#"{"target_temperature":220}"#,
+        r#"{"target_temperature":220,"client_id":"x","client_revision":1}"#,
+        "invalid",
+    ] {
+        let response = app.clone().oneshot(put(body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
+            "read_only"
+        );
+    }
+    assert!(controller.submit(220.try_into().unwrap()).is_err());
+    assert!(
+        controller
+            .submit_from(220.try_into().unwrap(), "x".into(), 1)
+            .is_err()
+    );
+    let state = controller.snapshot();
+    assert!(state.command.is_none() && state.desired.is_none() && state.in_flight.is_none());
+    assert_eq!(state.revision, 0);
+    for method in ["GET", "PUT"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/api/simulator")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let health: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(health["provider"], "ocstat");
+    assert_eq!(health["can_set_target"], false);
 }

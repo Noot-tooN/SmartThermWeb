@@ -22,6 +22,7 @@ struct Core {
 pub enum SubmitError {
     StaleRevision,
     TooManyClients,
+    ReadOnly,
 }
 #[derive(Clone)]
 pub struct Controller {
@@ -46,6 +47,12 @@ impl Default for Timing {
 }
 impl Controller {
     pub fn new() -> Self {
+        Self::configured("simulator", true)
+    }
+    pub fn ocstat_read_only() -> Self {
+        Self::configured("ocstat", false)
+    }
+    fn configured(provider: &str, can_set_target: bool) -> Self {
         let (events, _) = broadcast::channel(64);
         let session = format!(
             "{}-{}",
@@ -60,7 +67,9 @@ impl Controller {
                 state: Snapshot {
                     session,
                     revision: 0,
-                    provider: "simulator".into(),
+                    provider: provider.into(),
+                    can_set_target,
+                    read_error: None,
                     connectivity: Connectivity::Connecting,
                     last_sync: None,
                     confirmed: None,
@@ -86,9 +95,12 @@ impl Controller {
         core.state.revision += 1;
         let _ = self.events.send(core.state.clone());
     }
-    pub fn submit(&self, target: TargetTemperature) -> Snapshot {
+    pub fn submit(&self, target: TargetTemperature) -> Result<Snapshot, SubmitError> {
         let mut core = self.core.lock().unwrap();
-        self.enqueue(&mut core, target)
+        if !core.state.can_set_target {
+            return Err(SubmitError::ReadOnly);
+        }
+        Ok(self.enqueue(&mut core, target))
     }
     pub fn submit_from(
         &self,
@@ -97,6 +109,9 @@ impl Controller {
         revision: u64,
     ) -> Result<Snapshot, SubmitError> {
         let mut core = self.core.lock().unwrap();
+        if !core.state.can_set_target {
+            return Err(SubmitError::ReadOnly);
+        }
         if core
             .clients
             .get(&client)
@@ -175,7 +190,12 @@ impl Controller {
         {
             return;
         }
-        core.state.connectivity = Connectivity::Online;
+        core.state.connectivity = if observed.online {
+            Connectivity::Online
+        } else {
+            Connectivity::Offline
+        };
+        core.state.read_error = None;
         core.state.last_sync = Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -183,8 +203,8 @@ impl Controller {
                 .as_secs(),
         );
         // Initial synchronization only; subsequent reads must never replace user intent.
-        if core.state.desired.is_none() {
-            core.state.desired = Some(observed.target_temperature);
+        if core.state.can_set_target && core.state.desired.is_none() {
+            core.state.desired = observed.target_temperature.0.try_into().ok();
         }
         if let Some(command) = core.state.command.as_mut() {
             reconcile(command, &observed);
@@ -195,17 +215,24 @@ impl Controller {
         core.state.confirmed = Some(observed);
         self.publish(&mut core);
     }
-    fn offline(&self) {
+    fn read_failed(&self, error: ProviderError) {
         let mut core = self.core.lock().unwrap();
-        if core.state.connectivity != Connectivity::Offline {
-            core.state.connectivity = Connectivity::Offline;
+        let connectivity = if error == ProviderError::Offline {
+            Connectivity::Offline
+        } else {
+            Connectivity::Unavailable
+        };
+        if core.state.connectivity != connectivity || core.state.read_error != Some(error) {
+            core.state.connectivity = connectivity;
+            core.state.read_error = Some(error);
             self.publish(&mut core);
         }
     }
     async fn sync(&self, provider: &dyn Provider, timing: Timing) {
         match timeout(timing.request, provider.read()).await {
             Ok(Ok(state)) => self.observe(state),
-            _ => self.offline(),
+            Ok(Err(error)) => self.read_failed(error),
+            Err(_) => self.read_failed(ProviderError::Transport),
         }
     }
     /// Exactly one worker owns outbound writes and reads, avoiding read/write races.
@@ -237,7 +264,11 @@ impl Controller {
                     "Server acknowledged; waiting for a device observation.",
                 );
             }
-            Ok(Err(ProviderError::Rejected | ProviderError::UnverifiedProtocol)) => {
+            Ok(Err(
+                ProviderError::Rejected
+                | ProviderError::UnverifiedProtocol
+                | ProviderError::ReadOnly,
+            )) => {
                 self.phase(
                     id,
                     Phase::Rejected,
@@ -282,7 +313,8 @@ impl Default for Controller {
     }
 }
 fn reconcile(command: &mut Command, observed: &DeviceState) {
-    if observed.applied_command == Some(command.id) && observed.target_temperature == command.target
+    if observed.applied_command == Some(command.id)
+        && observed.target_temperature.0 == i16::from(command.target)
     {
         command.transition(
             Phase::Confirmed,
@@ -302,18 +334,46 @@ mod tests {
         DeviceState {
             revision,
             applied_command: id,
-            target_temperature: target(target_value),
+            target_temperature: Temperature(target_value),
+            online: true,
             room_temperature: Temperature(208),
             mode: Mode::Manual,
         }
     }
     #[test]
+    fn read_only_observations_follow_cloud_and_preserve_last_read_on_errors() {
+        let c = Controller::ocstat_read_only();
+        c.observe(observation(1, None, 215));
+        c.observe(observation(2, None, 230));
+        assert!(c.snapshot().desired.is_none());
+        assert_eq!(
+            c.snapshot().confirmed.as_ref().unwrap().target_temperature,
+            Temperature(230)
+        );
+        let last_sync = c.snapshot().last_sync;
+        c.read_failed(ProviderError::Transport);
+        assert_eq!(c.snapshot().connectivity, Connectivity::Unavailable);
+        assert_eq!(c.snapshot().last_sync, last_sync);
+        assert_eq!(
+            c.snapshot().confirmed.as_ref().unwrap().target_temperature,
+            Temperature(230)
+        );
+        let mut offline = observation(3, None, 225);
+        offline.online = false;
+        c.observe(offline);
+        assert_eq!(c.snapshot().connectivity, Connectivity::Offline);
+        assert_eq!(c.snapshot().read_error, None);
+        c.observe(observation(4, None, 220));
+        assert_eq!(c.snapshot().connectivity, Connectivity::Online);
+        assert!(c.snapshot().command.is_none());
+    }
+    #[test]
     fn pending_commands_coalesce_and_stale_ack_cannot_change_intent() {
         let c = Controller::new();
-        c.submit(target(220));
+        c.submit(target(220)).unwrap();
         let first = c.take_pending().unwrap();
-        c.submit(target(225));
-        c.submit(target(230));
+        c.submit(target(225)).unwrap();
+        c.submit(target(230)).unwrap();
         c.phase(first.id, Phase::AcceptedByCloud, "old acknowledgement");
         let latest = c.snapshot().command.unwrap();
         assert_eq!(latest.phase, Phase::Queued);
@@ -325,7 +385,7 @@ mod tests {
     fn out_of_order_observations_and_false_matching_values_are_ignored() {
         let c = Controller::new();
         c.observe(observation(5, None, 215));
-        c.submit(target(230));
+        c.submit(target(230)).unwrap();
         let command = c.take_pending().unwrap();
         c.phase(command.id, Phase::AcceptedByCloud, "ack");
         c.phase(command.id, Phase::AwaitingDevice, "wait");
@@ -342,13 +402,13 @@ mod tests {
     #[test]
     fn repeated_target_requires_new_application_evidence() {
         let c = Controller::new();
-        c.submit(target(220));
+        c.submit(target(220)).unwrap();
         let first = c.take_pending().unwrap();
         c.phase(first.id, Phase::AcceptedByCloud, "ack");
         c.phase(first.id, Phase::AwaitingDevice, "wait");
         c.observe(observation(2, Some(first.id), 220));
         c.finish(first.id);
-        c.submit(target(220));
+        c.submit(target(220)).unwrap();
         let second = c.take_pending().unwrap();
         c.phase(second.id, Phase::AcceptedByCloud, "ack");
         c.phase(second.id, Phase::AwaitingDevice, "wait");
@@ -363,7 +423,7 @@ mod tests {
         let c = Controller::new();
         c.observe(observation(1, None, 215));
         let before = c.snapshot();
-        c.offline();
+        c.read_failed(ProviderError::Offline);
         assert_eq!(c.snapshot().connectivity, Connectivity::Offline);
         assert_eq!(c.snapshot().confirmed, before.confirmed);
         assert_eq!(c.snapshot().last_sync, before.last_sync);
@@ -380,11 +440,11 @@ mod tests {
             ..Config::default()
         }));
         let worker = tokio::spawn(c.clone().run(simulator, Timing::default()));
-        c.submit(target(220));
+        c.submit(target(220)).unwrap();
         // Await the first sending event, then queue two requests while it is in flight.
         while events.recv().await.unwrap().in_flight.is_none() {}
-        c.submit(target(225));
-        c.submit(target(230));
+        c.submit(target(225)).unwrap();
+        c.submit(target(230)).unwrap();
         let mut sent = Vec::new();
         let mut saw_ack = false;
         loop {
@@ -406,7 +466,7 @@ mod tests {
         assert!(!sent.contains(&2));
         assert_eq!(
             c.snapshot().confirmed.unwrap().target_temperature,
-            target(230)
+            Temperature(230)
         );
         worker.abort();
     }
@@ -417,7 +477,7 @@ mod tests {
             ack_ms: 10,
             apply_ms: 70,
         });
-        c.submit(target(230));
+        c.submit(target(230)).unwrap();
         let command = c.take_pending().unwrap();
         let mut events = c.subscribe();
         c.execute(
@@ -472,7 +532,7 @@ mod tests {
             ack_ms: 0,
             apply_ms: 200,
         });
-        c.submit(target(230));
+        c.submit(target(230)).unwrap();
         c.execute(
             &provider,
             c.take_pending().unwrap(),

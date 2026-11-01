@@ -16,6 +16,26 @@ export class Dashboard {
   private clientId = crypto.randomUUID();
   constructor(private request: Request = (...args) => fetch(...args)) {}
 
+  get canSetTarget() {
+    return this.state?.can_set_target === true;
+  }
+  get readError() {
+    switch (this.state?.read_error) {
+      case null:
+      case undefined:
+        return '';
+      case 'authentication':
+        return 'Cloud login was rejected. Check the server credentials and restart the backend.';
+      case 'device_not_found':
+        return 'The configured thermostat was not returned by the cloud.';
+      case 'invalid_response':
+        return 'The cloud returned an unreadable device status. Showing the last known reading.';
+      case 'offline':
+        return 'The device is offline. Showing the last known reading.';
+      default:
+        return 'Cloud status is unavailable. Showing the last known reading; retrying automatically.';
+    }
+  }
   get target() {
     return (
       this.optimistic ??
@@ -41,6 +61,12 @@ export class Dashboard {
       return;
     }
     this.state = next;
+    if (!next.can_set_target) {
+      clearTimeout(this.timer);
+      this.ready = null;
+      this.optimistic = null;
+      this.localPending = false;
+    }
   }
   async refresh() {
     try {
@@ -59,7 +85,7 @@ export class Dashboard {
     }
   }
   change(delta: number) {
-    if (this.target === null) return;
+    if (!this.canSetTarget || this.target === null) return;
     const target = Math.min(300, Math.max(50, this.target + delta));
     this.optimistic = target;
     this.localPending = true;
@@ -76,7 +102,8 @@ export class Dashboard {
     if (this.target !== null) this.change(0);
   }
   private async drain() {
-    if (this.submitting || !this.ready || this.disposed) return;
+    if (!this.canSetTarget || this.submitting || !this.ready || this.disposed)
+      return;
     const pending = this.ready;
     this.ready = null;
     this.submitting = true;

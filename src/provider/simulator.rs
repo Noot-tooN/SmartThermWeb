@@ -58,7 +58,8 @@ impl Simulator {
                 config,
                 device: DeviceState {
                     room_temperature: Temperature(208),
-                    target_temperature: TargetTemperature::try_from(215).unwrap(),
+                    target_temperature: Temperature(215),
+                    online: true,
                     mode: Mode::Manual,
                     revision: 1,
                     applied_command: None,
@@ -94,7 +95,7 @@ impl Provider for Simulator {
             due.sort_by_key(|(id, _)| *id);
             for (id, target) in due {
                 if inner.device.applied_command.is_none_or(|last| id > last) {
-                    inner.device.target_temperature = target;
+                    inner.device.target_temperature = Temperature(target.into());
                     inner.device.applied_command = Some(id);
                     inner.device.revision += 1;
                 }

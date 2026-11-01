@@ -5,12 +5,15 @@ export const snapshot = (revision = 1): Snapshot => ({
   session: 'server-a',
   revision,
   provider: 'simulator',
+  can_set_target: true,
+  read_error: null,
   connectivity: 'online',
   last_sync: 123,
   desired: 215,
   confirmed: {
     room_temperature: 208,
     target_temperature: 215,
+    online: true,
     mode: { kind: 'manual' },
     revision: 1,
     applied_command: null,
@@ -151,4 +154,23 @@ describe('optimistic command flow', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(request).not.toHaveBeenCalled();
   });
+});
+
+it('cancels pending edits when the server changes to a read-only provider', async () => {
+  const { dashboard, request } = setup();
+  dashboard.change(5);
+  dashboard.accept(
+    {
+      ...snapshot(1),
+      session: 'read-only',
+      provider: 'ocstat',
+      can_set_target: false,
+      desired: null,
+    },
+    'stream',
+  );
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(request).not.toHaveBeenCalled();
+  expect(dashboard.target).toBe(215);
+  expect(dashboard.localPending).toBe(false);
 });

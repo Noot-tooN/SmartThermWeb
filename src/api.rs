@@ -21,7 +21,7 @@ use std::{convert::Infallible, sync::Arc};
 #[derive(Clone)]
 pub struct AppState {
     pub controller: Controller,
-    pub simulator: Arc<Simulator>,
+    pub simulator: Option<Arc<Simulator>>,
 }
 #[derive(rust_embed::RustEmbed)]
 #[folder = "$SMARTTHERM_ASSETS"]
@@ -32,10 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/thermostat", get(snapshot))
         .route("/api/thermostat/target", put(set_target))
         .route("/api/events", get(events))
-        .route(
-            "/api/health",
-            get(|| async { Json(json!({ "status": "ok", "provider": "simulator" })) }),
-        )
+        .route("/api/health", get(health))
         .route(
             "/api/simulator",
             get(simulator_config).put(configure_simulator),
@@ -48,10 +45,22 @@ pub enum ApiError {
     Invalid(String),
     StaleRevision,
     TooManyClients,
+    ReadOnly,
+    NotSimulator,
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
+            Self::ReadOnly => (
+                StatusCode::FORBIDDEN,
+                "read_only",
+                "This provider is read-only; temperature changes are disabled.".into(),
+            ),
+            Self::NotSimulator => (
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Simulator settings are unavailable for this provider.".into(),
+            ),
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", message),
             Self::StaleRevision => (
                 StatusCode::CONFLICT,
@@ -89,9 +98,15 @@ async fn set_target(
     State(state): State<AppState>,
     body: Result<Json<TargetRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if !state.controller.snapshot().can_set_target {
+        return Err(ApiError::ReadOnly);
+    }
     let Json(body) = body.map_err(|e| ApiError::Invalid(e.body_text()))?;
     let snapshot = match (body.client_id, body.client_revision) {
-        (None, None) => state.controller.submit(body.target_temperature),
+        (None, None) => state
+            .controller
+            .submit(body.target_temperature)
+            .map_err(|_| ApiError::ReadOnly)?,
         (Some(client), Some(revision))
             if !client.is_empty() && client.len() <= 80 && revision > 0 =>
         {
@@ -101,6 +116,7 @@ async fn set_target(
                 .map_err(|error| match error {
                     SubmitError::StaleRevision => ApiError::StaleRevision,
                     SubmitError::TooManyClients => ApiError::TooManyClients,
+                    SubmitError::ReadOnly => ApiError::ReadOnly,
                 })?
         }
         _ => {
@@ -112,20 +128,33 @@ async fn set_target(
     };
     Ok((StatusCode::ACCEPTED, Json(snapshot)))
 }
-async fn simulator_config(State(state): State<AppState>) -> Json<Config> {
-    Json(state.simulator.config())
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let snapshot = state.controller.snapshot();
+    Json(
+        json!({ "status": "ok", "provider": snapshot.provider, "can_set_target": snapshot.can_set_target }),
+    )
+}
+async fn simulator_config(State(state): State<AppState>) -> Result<Json<Config>, ApiError> {
+    Ok(Json(
+        state
+            .simulator
+            .as_ref()
+            .ok_or(ApiError::NotSimulator)?
+            .config(),
+    ))
 }
 async fn configure_simulator(
     State(state): State<AppState>,
     body: Result<Json<Config>, JsonRejection>,
 ) -> Result<Json<Config>, ApiError> {
+    let simulator = state.simulator.as_ref().ok_or(ApiError::NotSimulator)?;
     let Json(config) = body.map_err(|e| ApiError::Invalid(e.body_text()))?;
     if !config.validate() {
         return Err(ApiError::Invalid(
             "ack_ms must be ≤ 30000 and apply_ms ≤ 60000.".into(),
         ));
     }
-    state.simulator.configure(config.clone());
+    simulator.configure(config.clone());
     Ok(Json(config))
 }
 async fn events(State(state): State<AppState>) -> impl IntoResponse {

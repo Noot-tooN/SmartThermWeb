@@ -18,12 +18,15 @@ export interface Snapshot {
   session: string;
   revision: number;
   provider: string;
-  connectivity: 'connecting' | 'online' | 'offline';
+  can_set_target: boolean;
+  read_error: string | null;
+  connectivity: 'connecting' | 'online' | 'offline' | 'unavailable';
   last_sync: number | null;
   desired: number | null;
   confirmed: {
     room_temperature: number;
     target_temperature: number;
+    online: boolean;
     mode: { kind: string; raw?: string };
     revision: number;
     applied_command: number | null;

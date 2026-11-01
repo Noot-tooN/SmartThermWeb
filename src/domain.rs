@@ -54,6 +54,7 @@ pub enum Connectivity {
     Connecting,
     Online,
     Offline,
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +108,8 @@ impl Command {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceState {
     pub room_temperature: Temperature,
-    pub target_temperature: TargetTemperature,
+    pub target_temperature: Temperature,
+    pub online: bool,
     pub mode: Mode,
     /// Provider monotonic observation revision, not a wall-clock timestamp.
     pub revision: u64,
@@ -120,6 +122,8 @@ pub struct Snapshot {
     pub session: String,
     pub revision: u64,
     pub provider: String,
+    pub can_set_target: bool,
+    pub read_error: Option<crate::provider::ProviderError>,
     pub connectivity: Connectivity,
     pub last_sync: Option<u64>,
     pub confirmed: Option<DeviceState>,

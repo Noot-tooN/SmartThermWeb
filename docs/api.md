@@ -6,9 +6,9 @@ Same origin, JSON. All temperatures are integer tenths of °C. Errors use `{"err
 | --- | --- | --- |
 | GET | `/api/health` | Process health and provider name, not device connectivity |
 | GET | `/api/thermostat` | Current full snapshot, `Cache-Control: no-store` |
-| PUT | `/api/thermostat/target` | Validate and queue desired target, HTTP 202 |
+| PUT | `/api/thermostat/target` | Simulator: validate and queue desired target, HTTP 202. OCSTAT: HTTP 403 `read_only` |
 | GET | `/api/events` | SSE `state` events containing full snapshots; initial snapshot on each connection |
-| GET / PUT | `/api/simulator` | Read/change simulator scenario and latencies |
+| GET / PUT | `/api/simulator` | Read/change simulator scenario and latencies; HTTP 404 in OCSTAT mode |
 
 ## Temperature request
 
@@ -31,3 +31,11 @@ Events have `event: state`, `id: <session>:<revision>`, and JSON data. Clients s
 ```
 
 Scenarios: `normal`, `rejected`, `transport_failure`, `reply_lost`, `ack_timeout`, `device_timeout`, `offline`. Reply delay is 0–30000 ms; application delay 0–60000 ms. The current config is returned after a successful PUT. Rejected/transport_failure/device_timeout/offline never schedule a new device application. Reply_lost and ack_timeout do schedule application, even though the server reply is unavailable. Returning from offline allows pending scheduled applications to be observed.
+
+## OCSTAT read-only snapshots
+
+Snapshots add `can_set_target` and `read_error`. OCSTAT always advertises `can_set_target: false`; its `desired`, `command`, and `in_flight` remain null. `confirmed` contains the selected cloud device observation with `online`, integer-tenths room/target temperatures, unknown mode, a locally ordered read revision, and `applied_command: null`. This field name does not imply physical device confirmation. OCSTAT observed targets are not limited by simulator write range/steps.
+
+`connectivity` is `connecting`, `online`, `offline`, or `unavailable`. The latter means the backend could not obtain usable status, not that the thermostat is known offline. `read_error` is null on a successful read or a sanitized enum such as `authentication`, `transport`, `invalid_response`, `device_not_found`, or `rejected`. Upstream messages, credentials, tokens and account/device identifiers are never included. Failed reads retain the previous observation and `last_sync`; successful reads update `last_sync` to the cloud retrieval time, not physical measurement time.
+
+The health response reports the active provider and `can_set_target`; it does not claim cloud connectivity. Snapshot GET/Refresh never makes an extra upstream call. The worker owns all reads and polls OCSTAT every 30 seconds.

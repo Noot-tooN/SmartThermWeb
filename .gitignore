@@ -6,6 +6,7 @@
 !.env.example
 *.pcap
 *.pcapng
+*.keylog
 *.har
 *.key
 *.pem
@@ -13,3 +14,4 @@ captures/
 secrets/
 .DS_Store
 .codegraph/
+ocstat-credentials.json

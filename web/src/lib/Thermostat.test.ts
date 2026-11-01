@@ -8,12 +8,15 @@ const initial: Snapshot = {
   session: 'test',
   revision: 1,
   provider: 'simulator',
+  can_set_target: true,
+  read_error: null,
   connectivity: 'online',
   last_sync: 123,
   desired: 215,
   confirmed: {
     room_temperature: 208,
     target_temperature: 215,
+    online: true,
     mode: { kind: 'manual' },
     revision: 1,
     applied_command: null,
@@ -174,4 +177,41 @@ it('exposes checkpoint explanations on keyboard focus without changing the miles
   await fireEvent.keyDown(cloud, { key: 'Escape' });
   expect(screen.queryByRole('tooltip')).toBeNull();
   dashboard.dispose();
+});
+
+it('shows cloud readings without temperature controls or a false synced checkpoint', async () => {
+  vi.useFakeTimers();
+  const request = vi.fn();
+  const dashboard = new Dashboard(request);
+  dashboard.accept({
+    ...initial,
+    provider: 'ocstat',
+    can_set_target: false,
+    desired: null,
+  });
+  render(Thermostat, { dashboard });
+  const increase = screen.getByRole('button', {
+    name: 'Increase target temperature by 0.5 degrees',
+  }) as HTMLButtonElement;
+  expect(increase.disabled).toBe(true);
+  await fireEvent.click(increase);
+  dashboard.change(5);
+  dashboard.retry();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(request).not.toHaveBeenCalled();
+  expect(screen.queryByRole('progressbar')).toBeNull();
+  expect(screen.getByText('Cloud-reported reading')).toBeTruthy();
+  flushSync(() =>
+    dashboard.accept({
+      ...initial,
+      revision: 2,
+      provider: 'ocstat',
+      can_set_target: false,
+      desired: null,
+      confirmed: { ...initial.confirmed!, target_temperature: 230 },
+    }),
+  );
+  expect(
+    screen.getByLabelText('Desired target temperature').textContent,
+  ).toContain('23.0');
 });
