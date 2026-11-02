@@ -430,6 +430,27 @@ impl smartthermweb::provider::Provider for FakeAccount {
                 .ok_or(smartthermweb::provider::ProviderError::LoginRequired)
         })
     }
+    fn schedule_trial(
+        &self,
+        _action: smartthermweb::provider::ocstat::trial::Action,
+    ) -> smartthermweb::provider::ProviderFuture<'_, smartthermweb::provider::ocstat::trial::Status>
+    {
+        Box::pin(async {
+            let guard = self.0.lock().unwrap();
+            let state = guard
+                .as_ref()
+                .ok_or(smartthermweb::provider::ProviderError::LoginRequired)?;
+            Ok(smartthermweb::provider::ocstat::trial::Status {
+                trial_id: None,
+                phase: None,
+                group: "Weekends",
+                start_minute: None,
+                original_temperature: Some(state.room_temperature.0 as u16),
+                trial_temperature: None,
+                message: "Synthetic trial status".into(),
+            })
+        })
+    }
     fn read_schedule(
         &self,
     ) -> smartthermweb::provider::ProviderFuture<'_, smartthermweb::schedule::Schedule> {
@@ -766,7 +787,7 @@ async fn schedule_preview_validates_without_mutating_thermostat_state() {
         );
     }
     assert_eq!(serde_json::to_value(controller.snapshot()).unwrap(), before);
-    // The schedule route is read-only; PUT is deliberately unsupported.
+    // Saving always requires an authenticated same-origin browser session.
     let response = app
         .oneshot(
             Request::builder()
@@ -777,7 +798,7 @@ async fn schedule_preview_validates_without_mutating_thermostat_state() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 #[tokio::test]
 async fn schedule_preview_requires_signed_in_same_origin_session() {
@@ -859,4 +880,139 @@ async fn schedule_read_is_authenticated_isolated_and_never_writes() {
     .await;
     assert_eq!(before["desired"], after["desired"]);
     assert_eq!(before["command"], after["command"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn trial_requires_opt_in_same_origin_auth_and_valid_actions() {
+    use smartthermweb::api::router_with_schedule_trial;
+    fn request(body: &str, cookie: &str, origin: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/thermostat/schedule/trial")
+            .header("host", "localhost:3000")
+            .header("origin", origin)
+            .header("cookie", cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    }
+    let body = r#"{"action":"status"}"#;
+    assert_eq!(
+        cloud_app()
+            .oneshot(request(body, "", "http://localhost:3000"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let app = router_with_schedule_trial(
+        AppState {
+            controller: Controller::ocstat_read_only(),
+            simulator: None,
+            sessions: Some(Arc::new(smartthermweb::sessions::Sessions::with_factory(
+                Arc::new(|| Ok(Arc::new(FakeAccount::default()))),
+            ))),
+        },
+        true,
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(body, "", "http://localhost:3000"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let one = sign_in(&app, "one@example.test").await;
+    assert_eq!(
+        app.clone()
+            .oneshot(request(body, &one, "https://other.example"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    for invalid in [
+        r#"{"action":"apply"}"#,
+        r#"{"action":"status","extra":true}"#,
+        r#"{"action":"apply","trial_id":"x","confirm_change":"yes"}"#,
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request(invalid, &one, "http://localhost:3000"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let result = app
+        .clone()
+        .oneshot(request(body, &one, "http://localhost:3000"))
+        .await
+        .unwrap();
+    assert_eq!(result.headers()["cache-control"], "no-store");
+    assert_eq!(json(result).await["original_temperature"], 210);
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    let two = sign_in(&app, "second@example.test").await;
+    let result = app
+        .oneshot(request(body, &two, "http://localhost:3000"))
+        .await
+        .unwrap();
+    assert_eq!(json(result).await["original_temperature"], 190);
+}
+
+#[tokio::test(start_paused = true)]
+async fn schedule_save_requires_auth_origin_and_valid_baseline_and_does_not_enable_other_providers()
+{
+    fn req(body: &str, cookie: &str, origin: &str) -> Request<Body> {
+        Request::builder()
+            .method("PUT")
+            .uri("/api/thermostat/schedule")
+            .header("host", "localhost:3000")
+            .header("origin", origin)
+            .header("cookie", cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    }
+    let app = cloud_app();
+    let body = format!("{{\"baseline\":{DRAFT},\"schedule\":{DRAFT}}}");
+    assert_eq!(
+        app.clone()
+            .oneshot(req(&body, "", "http://localhost:3000"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let cookie = sign_in(&app, "one@example.test").await;
+    assert_eq!(
+        app.clone()
+            .oneshot(req(&body, &cookie, "https://other.example"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    for invalid in [
+        DRAFT.to_owned(),
+        body.replace("215", "214"),
+        body.replace("420", "421"),
+        body.replace("\"baseline\"", "\"unexpected\""),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(req(&invalid, &cookie, "http://localhost:3000"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let response = app
+        .oneshot(req(&body, &cookie, "http://localhost:3000"))
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::OK); // Default providers remain read-only.
 }

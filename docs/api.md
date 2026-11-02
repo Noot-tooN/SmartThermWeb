@@ -81,7 +81,7 @@ The process-wide `/api/health` response uses the anonymous controller, so its OC
 
 ### Auto and temporary override
 
-OCSTAT reports `mode.kind: schedule` for matching work/status mode `0`, or `temporary_override` for matching mode `1`, with `program_mode=1`. Other or disagreeing contexts remain `unknown` and cannot write. Labels describe cloud observations. An online target change in either supported mode sends `work_mode=1`, following Android's Auto-to-temporary-override behavior. The local target API is unchanged; the provider decides from a fresh preflight, never a client-supplied mode. Scheduled readings do not count as a matching temporary-override command. No device application evidence is created.
+OCSTAT reports `mode.kind: schedule` for matching work/status mode `0`, or `temporary_override` for matching mode `1`, with `program_mode` 0, 1, or 2. Other or disagreeing contexts remain `unknown` and cannot write. Labels describe cloud observations. An online target change in either supported mode sends `work_mode=1`, following Android's Auto-to-temporary-override behavior. The local target API is unchanged; the provider decides from a fresh preflight, never a client-supplied mode. Scheduled readings do not count as a matching temporary-override command. No device application evidence is created.
 
 ## Schedule draft preview
 
@@ -102,7 +102,7 @@ Periods before the first change inherit the preceding actual day's last target.
 A redundant 00:00 anchor is removed only if it matches the last temperature of
 every preceding day that feeds that group. A seven-row editor draft is accepted
 only when that reduces to six actual changes. Real midnight changes are retained.
-No timezone/current-time assumptions are made. There is no schedule write route.
+No timezone/current-time assumptions are made. Preview never calls the schedule write route.
 
 The manufacturer adapter separately maps to APK programme mode/day codes and
 active `[minute, temperature]` arrays. This is not a complete send-ready payload:
@@ -112,13 +112,13 @@ verification. No manufacturer codes, tokens, or device identifiers reach the UI.
 ## Schedule loading
 
 `GET /api/thermostat/schedule` requires a signed-in browser session and returns
-the same clean `schedule`, seven-day `days`, and `can_save: false` shape as the
-preview endpoint. It is no-store and never exposes tokens, device IDs, disabled
+the clean `schedule`, seven-day `days`, `can_save`, and `save_pending`.
+`can_save` is true for any decoded supported pattern with no unresolved write. It is no-store and never exposes tokens, device IDs, disabled
 raw slots, or wire frames. Missing/expired auth is 401; unreadable or incomplete
-upstream data is 502. PUT is unsupported (405).
+upstream data is 502.
 
 Unlike ordinary snapshot GET, this is an explicit on-demand upstream read queued
-through the controller worker. At most one schedule read may be queued/running
+through the controller worker. At most one schedule read, save, or trial may be queued/running
 per browser session; duplicate requests fail rather than building a queue.
 A canceled queued request is skipped, timeout releases the queue, and logout
 invalidates pending/late results. Target writes retain priority.
@@ -130,3 +130,59 @@ a fresh client ID, and only registration/read selectors. It checks frame length,
 device identity, mode, six slots per group, disabled-slot encoding, time/target
 ranges and complete groups. HTTPS status reads before/after must agree on mode
 and remain online. This is a server observation, not physical acknowledgement.
+
+## Restricted schedule trial
+
+Only when `SMARTTHERM_SCHEDULE_TRIAL_DIR` is configured, `/schedule-trial` serves
+an isolated test page and `POST /api/thermostat/schedule/trial` accepts:
+
+- `{"action":"status"}`: return local trial metadata; no upstream read/write.
+- `{"action":"prepare"}`: fresh read, private durable backup, and a proposed
+  +0.5°C change to one existing weekend slot in mode 1. No thermostat write.
+- `{"action":"apply","trial_id":"…","confirm_change":true}`: compare the
+  complete fresh baseline, persist uncertain state, send the six-slot group
+  once, and read it back.
+- `{"action":"check","trial_id":"…"}`: read without resending.
+- `{"action":"restore","trial_id":"…"}`: require the current test group to
+  match exactly, persist uncertain state, send its original six slots once, and
+  read it back. Other groups are not written.
+
+Requests require a signed-in same-origin browser session, strict action fields,
+and a matching trial ID for mutations/checks. Responses are no-store and omit
+provider IDs, tokens, raw slots, and raw responses. Phases are `prepared`,
+`apply_sent`, `applied`, `restore_sent`, and `restored`; `applied`/`restored` mean
+matching server read-back only. Trial worker operations have a 90-second bound;
+HTTP waits at most 100 seconds. Cancellation never implies a write was undone:
+the durable phase is set before dispatch. Normal saves use the separately validated PUT below.
+
+## Saving schedules
+
+`PUT /api/thermostat/schedule` requires a same-origin signed-in browser session,
+a JSON body of at most 16 KiB, and `{ "baseline": Schedule, "schedule": Schedule }`.
+Both models are strictly validated. The provider compares the baseline to a fresh
+read, maps all validated periods into the six-slot arrays using the APK disable/reuse
+encoding. Unused slots retain their times and temperatures. Grouping changes
+first send `setProgrammeModeNew`, then read the activated grouping before editing
+its periods; its prior stored schedule can be active in between. A normal read-only provider cannot save.
+
+The no-store result contains `status` (`accepted`, `conflict`, `unverified`, or
+`unsupported`), `accepted_groups`, `message`, and `current` (a fresh preview when
+available, otherwise null). HTTP 200 alone does not mean acceptance; clients must
+inspect `status`. Malformed models are 400, missing auth is 401, invalid Origin is
+403. Transport/timeout errors cannot prove that no write occurred: read before
+retrying. Worker saves are bounded at 360 seconds, with a 370-second API deadline.
+
+Writes are serialized with the session's other provider work, and a shared gate
+serializes schedule operations across sessions. Changed groups are sent once,
+then read back exactly before proceeding. Readback failure/mismatch stops the
+operation and keeps the dispatched group pending. GET can reconcile a late
+server match without resending. Pending tracking is per account/device in memory,
+survives request cancellation/logout, and is cleared by a matching read. It does
+not persist across process restarts; no startup retry occurs. No response claims
+physical application. A concurrent external Android edit can still race preflight.
+
+Pending operations distinguish mode changes from group writes. An exact mode
+readback reconciles the former, while the latter requires all six target slots.
+No remaining groups are resumed by GET after a timeout; it only observes state.
+The browser retains its desired draft and marks the currently observed grouping,
+including when the grouping changed but some/all period writes remain unverified.

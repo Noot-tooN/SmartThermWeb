@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Schedule save test</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font: 16px system-ui;
+      background: #18241e;
+      color: #e1e8e2;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }
+    a {
+      color: #b1d5b6;
+    }
+    h1 {
+      font-size: 24px;
+      font-weight: 600;
+    }
+    p {
+      line-height: 1.5;
+      color: #b2beb5;
+    }
+    section {
+      padding: 24px;
+      border: 1px solid #3a4e40;
+      border-radius: 16px;
+      background: #213128;
+      margin-top: 24px;
+    }
+    dl {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    dt {
+      color: #b2beb5;
+    }
+    dd {
+      margin: 0;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    label {
+      display: flex;
+      gap: 12px;
+      align-items: start;
+      line-height: 1.5;
+      margin: 24px 0;
+    }
+    input {
+      margin-top: 6px;
+    }
+    button {
+      font: inherit;
+      min-height: 44px;
+      padding: 10px 16px;
+      border: 1px solid #536a59;
+      border-radius: 8px;
+      color: inherit;
+      background: #2c4433;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .primary {
+      background: #b1d5b6;
+      color: #17281d;
+    }
+    #message {
+      min-height: 4.5em;
+    }
+    small {
+      display: block;
+      color: #b2beb5;
+      line-height: 1.5;
+      margin-top: 24px;
+    }
+    [hidden] {
+      display: none !important;
+    }
+    button:focus-visible,
+    a:focus-visible,
+    input:focus-visible {
+      outline: 3px solid #d8b87f;
+      outline-offset: 3px;
+    }
+  </style>
+  <a href="/">← Thermostat</a>
+  <h1>Schedule save test</h1>
+  <p>
+    This tests one existing weekend period at +0.5°C, then restores it. Times,
+    unused slots and the schedule mode stay unchanged. Normal schedule saving
+    remains disabled.
+  </p>
+  <section aria-labelledby="plan-title">
+    <h2 id="plan-title" style="font-size: 18px">Test plan</h2>
+    <p id="initial">
+      Sign in on the thermostat page first. Prepare reads the schedule and keeps
+      a private recovery backup on this Mac.
+    </p>
+    <dl id="plan" hidden>
+      <dt>Group</dt>
+      <dd id="group"></dd>
+      <dt>Starting at</dt>
+      <dd id="time"></dd>
+      <dt>Original target</dt>
+      <dd id="original"></dd>
+      <dt>Test target</dt>
+      <dd id="target"></dd>
+      <dt>Stage</dt>
+      <dd id="phase"></dd>
+    </dl>
+    <label id="confirmation" hidden
+      ><input type="checkbox" id="confirm-change" />I agree to this temporary
+      +0.5°C schedule change, even if it affects the heating now.</label
+    >
+    <div class="actions">
+      <button id="prepare">Prepare test</button
+      ><button id="apply" class="primary" disabled>Apply test change</button
+      ><button id="restore" disabled>Restore original</button
+      ><button id="check">Check status</button>
+    </div>
+    <p id="message" role="status" aria-live="polite"></p>
+    <small
+      >Only Apply and Restore send changes. Each is sent once. Check reads the
+      server without resending. Server read-back does not confirm physical
+      thermostat application. Keep this page open until restoration is
+      verified.</small
+    >
+  </section>
+  <script>
+    const byId = (id) => document.getElementById(id);
+    let state = null,
+      busy = false,
+      uncertain = false;
+    const names = {
+      prepared: "Prepared — no change sent",
+      apply_sent: "Apply sent — outcome unverified",
+      applied: "Test value read back",
+      restore_sent: "Restore sent — outcome unverified",
+      restored: "Original value read back",
+    };
+    function render() {
+      const phase = state?.phase;
+      byId("plan").hidden = !phase;
+      byId("initial").hidden = !!phase;
+      byId("confirmation").hidden = phase !== "prepared";
+      if (phase) {
+        byId("group").textContent = state.group;
+        byId("time").textContent =
+          String(Math.floor(state.start_minute / 60)).padStart(2, "0") +
+          ":" +
+          String(state.start_minute % 60).padStart(2, "0");
+        byId("original").textContent =
+          (state.original_temperature / 10).toFixed(1) + "°C";
+        byId("target").textContent =
+          (state.trial_temperature / 10).toFixed(1) + "°C";
+        byId("phase").textContent = names[phase] || phase;
+      }
+      byId("prepare").disabled =
+        busy || (!!phase && !["prepared", "restored"].includes(phase));
+      byId("apply").disabled =
+        busy ||
+        uncertain ||
+        phase !== "prepared" ||
+        !byId("confirm-change").checked;
+      byId("restore").disabled =
+        busy || uncertain || !["applied", "apply_sent"].includes(phase);
+      byId("check").disabled = busy;
+    }
+    async function send(action) {
+      busy = true;
+      render();
+      byId("message").textContent =
+        action === "prepare"
+          ? "Reading and backing up the schedule…"
+          : action === "apply"
+            ? "Sending the test change, then reading the server…"
+            : action === "restore"
+              ? "Sending the original schedule, then reading the server…"
+              : "Checking…";
+      const body = { action };
+      if (["apply", "restore", "check"].includes(action))
+        body.trial_id = state?.trial_id;
+      if (action === "apply")
+        body.confirm_change = byId("confirm-change").checked;
+      try {
+        const response = await fetch("/api/thermostat/schedule/trial", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(110000),
+        });
+        const result = await response.json();
+        if (!response.ok)
+          throw Error(
+            response.status === 401
+              ? "Sign in on the thermostat page, then return here."
+              : result.error?.message || "The request could not be completed.",
+          );
+        state = result;
+        uncertain = false;
+        byId("message").textContent = result.message;
+        if (action === "prepare") byId("confirm-change").checked = false;
+      } catch (error) {
+        uncertain = true;
+        byId("message").textContent =
+          (error.message || "Connection lost.") +
+          " No automatic retry was sent. Use Check status before attempting another write.";
+      } finally {
+        busy = false;
+        render();
+      }
+    }
+    byId("prepare").onclick = () => send("prepare");
+    byId("apply").onclick = () => send("apply");
+    byId("restore").onclick = () => send("restore");
+    byId("check").onclick = () =>
+      send(uncertain ? "status" : state?.trial_id ? "check" : "status");
+    byId("confirm-change").onchange = render;
+    send("status");
+  </script>
+</html>

@@ -37,7 +37,27 @@ pub trait Provider: Send + Sync {
     fn login(&self, _email: String, _password: String) -> ProviderFuture<'_, DeviceState> {
         Box::pin(async { Err(ProviderError::ReadOnly) })
     }
+    fn schedule_trial(
+        &self,
+        _action: ocstat::trial::Action,
+    ) -> ProviderFuture<'_, ocstat::trial::Status> {
+        Box::pin(async { Err(ProviderError::ReadOnly) })
+    }
     fn read_schedule(&self) -> ProviderFuture<'_, crate::schedule::Schedule> {
+        Box::pin(async { Err(ProviderError::ReadOnly) })
+    }
+    fn read_schedule_preview(&self) -> ProviderFuture<'_, crate::schedule::Preview> {
+        Box::pin(async {
+            self.read_schedule()
+                .await?
+                .preview()
+                .map_err(|_| ProviderError::InvalidResponse)
+        })
+    }
+    fn save_schedule(
+        &self,
+        _request: crate::schedule::SaveRequest,
+    ) -> ProviderFuture<'_, crate::schedule::SaveResult> {
         Box::pin(async { Err(ProviderError::ReadOnly) })
     }
     fn read(&self) -> ProviderFuture<'_, DeviceState>;

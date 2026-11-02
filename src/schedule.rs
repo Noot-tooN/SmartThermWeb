@@ -66,24 +66,51 @@ pub struct Schedule {
     pub pattern: Pattern,
     pub groups: Vec<DayGroup>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct Period {
     pub start_minute: u16,
     pub end_minute: u16,
     pub target_temperature: TargetTemperature,
     pub continues_from_previous_day: bool,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct DayPreview {
     pub day: Group,
     pub periods: Vec<Period>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct Preview {
     pub schedule: Schedule,
     pub days: Vec<DayPreview>,
     pub can_save: bool,
+    /// A dispatched write has not yet been observed in a server read.
+    #[serde(default)]
+    pub save_pending: bool,
 }
+
+/// Baseline is the last loaded server model, never the independently edited draft.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveRequest {
+    pub baseline: Schedule,
+    pub schedule: Schedule,
+}
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SaveStatus {
+    Accepted,
+    Conflict,
+    Unverified,
+    Unsupported,
+}
+#[derive(Debug, Serialize)]
+pub struct SaveResult {
+    pub status: SaveStatus,
+    pub accepted_groups: Vec<Group>,
+    pub message: String,
+    pub current: Option<Preview>,
+}
+
 impl Schedule {
     pub fn validate(mut self) -> Result<Self, &'static str> {
         let expected = self.pattern.groups();
@@ -174,6 +201,7 @@ impl Schedule {
             schedule,
             days,
             can_save: false,
+            save_pending: false,
         })
     }
 }

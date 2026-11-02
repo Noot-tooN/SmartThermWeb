@@ -32,7 +32,21 @@ pub struct AppState {
 struct Assets;
 
 pub fn router(state: AppState) -> Router {
+    router_with_schedule_trial(state, false)
+}
+pub fn router_with_schedule_trial(state: AppState, trial_enabled: bool) -> Router {
+    let trial_routes = if trial_enabled {
+        Router::new()
+            .route("/schedule-trial", get(schedule_trial_page))
+            .route(
+                "/api/thermostat/schedule/trial",
+                post(schedule_trial).layer(DefaultBodyLimit::max(1024)),
+            )
+    } else {
+        Router::new()
+    };
     Router::new()
+        .merge(trial_routes)
         .route(
             "/api/login",
             post(login).layer(DefaultBodyLimit::max(16_384)),
@@ -41,7 +55,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/session", get(session_status))
         .route("/api/thermostat", get(snapshot))
         .route("/api/thermostat/target", put(set_target))
-        .route("/api/thermostat/schedule", get(read_schedule))
+        .route(
+            "/api/thermostat/schedule",
+            get(read_schedule)
+                .put(save_schedule)
+                .layer(DefaultBodyLimit::max(16_384)),
+        )
         .route(
             "/api/thermostat/schedule/preview",
             post(preview_schedule).layer(DefaultBodyLimit::max(16_384)),
@@ -361,8 +380,42 @@ async fn read_schedule(
         | crate::provider::ProviderError::Authentication => ApiError::Unauthenticated,
         _ => ApiError::CloudUnavailable,
     })?;
-    let preview = schedule.preview().map_err(|_| ApiError::CloudUnavailable)?;
+    let preview = schedule;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(preview)))
+}
+async fn save_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<crate::schedule::SaveRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !local_same_origin(&headers) {
+        return Err(ApiError::InvalidOrigin);
+    }
+    let session = browser_session(&state, &headers).ok_or(ApiError::Unauthenticated)?;
+    let Json(mut request) = body.map_err(|_| {
+        ApiError::Invalid("Provide the loaded baseline and desired schedule.".into())
+    })?;
+    request.baseline = request
+        .baseline
+        .validate()
+        .map_err(|e| ApiError::Invalid(e.into()))?;
+    request.schedule = request
+        .schedule
+        .validate()
+        .map_err(|e| ApiError::Invalid(e.into()))?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(370),
+        session.controller.save_schedule(request),
+    )
+    .await
+    .map_err(|_| ApiError::CloudUnavailable)?
+    .map_err(|e| match e {
+        crate::provider::ProviderError::Authentication
+        | crate::provider::ProviderError::LoginRequired => ApiError::Unauthenticated,
+        crate::provider::ProviderError::ReadOnly => ApiError::ReadOnly,
+        _ => ApiError::CloudUnavailable,
+    })?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)))
 }
 // Pure calculation: this route never invokes a provider or persists a schedule.
 async fn preview_schedule(
@@ -511,4 +564,37 @@ async fn assets(uri: Uri) -> Response {
             .unwrap(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn schedule_trial_page() -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        axum::response::Html(include_str!("schedule_trial.html")),
+    )
+}
+async fn schedule_trial(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<crate::provider::ocstat::trial::Action>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !local_same_origin(&headers) {
+        return Err(ApiError::InvalidOrigin);
+    }
+    let session = browser_session(&state, &headers).ok_or(ApiError::Unauthenticated)?;
+    let Json(action) = body.map_err(|e| ApiError::Invalid(e.body_text()))?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(100),
+        session.controller.schedule_trial(action),
+    )
+    .await
+    .map_err(|_| ApiError::CloudUnavailable)?
+    .map_err(|e| match e {
+        crate::provider::ProviderError::Authentication
+        | crate::provider::ProviderError::LoginRequired => ApiError::Unauthenticated,
+        crate::provider::ProviderError::ReadOnly
+        | crate::provider::ProviderError::UnverifiedProtocol
+        | crate::provider::ProviderError::Rejected => ApiError::ReadOnly,
+        _ => ApiError::CloudUnavailable,
+    })?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)))
 }

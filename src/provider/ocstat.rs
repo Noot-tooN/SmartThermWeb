@@ -5,6 +5,11 @@ use serde::Deserialize;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+#[path = "ocstat_save.rs"]
+mod save;
+#[path = "ocstat_trial.rs"]
+pub mod trial;
+
 const ORIGIN: &str = "https://www.ocstat-thermostat.com";
 const MAX_RESPONSE: usize = 1024 * 1024;
 
@@ -14,6 +19,8 @@ enum Endpoint {
     DeviceList,
     DeviceStatus,
     SetTarget,
+    SetProgramme,
+    SetProgrammeMode,
 }
 impl Endpoint {
     fn url(self) -> String {
@@ -24,6 +31,8 @@ impl Endpoint {
                 Self::DeviceList => "getDeviceListNew",
                 Self::DeviceStatus => "getDeviceStatus",
                 Self::SetTarget => "setThermostatWorkModeNew",
+                Self::SetProgramme => "setProgrammeByDay",
+                Self::SetProgrammeMode => "setProgrammeModeNew",
             }
         )
     }
@@ -245,8 +254,8 @@ impl WriteContext {
             self.work_mode.as_str(),
             self.status_mode,
         ) {
-            ("1", "0", b'0') => Mode::Schedule,
-            ("1", "1", b'1') => Mode::TemporaryOverride,
+            ("0" | "1" | "2", "0", b'0') => Mode::Schedule,
+            ("0" | "1" | "2", "1", b'1') => Mode::TemporaryOverride,
             _ => Mode::Unknown("unverified".into()),
         }
     }
@@ -279,6 +288,8 @@ struct AuthState {
 pub struct Ocstat {
     transport: Box<dyn Transport>,
     auth: Mutex<AuthState>,
+    trial: Option<std::sync::Arc<trial::TrialStore>>,
+    schedule_reader: Box<dyn trial::ScheduleReader>,
 }
 impl Ocstat {
     pub fn new() -> Result<Self, reqwest::Error> {
@@ -287,6 +298,8 @@ impl Ocstat {
     fn with_transport(transport: Box<dyn Transport>) -> Self {
         Self {
             transport,
+            trial: None,
+            schedule_reader: Box::new(trial::TcpScheduleReader),
             auth: Mutex::new(AuthState {
                 session: None,
                 device_id: None,
@@ -380,9 +393,19 @@ impl Ocstat {
         auth.revision += 1;
         Ok(observed)
     }
+    pub fn with_schedule_trial(mut self, store: std::sync::Arc<trial::TrialStore>) -> Self {
+        self.trial = Some(store);
+        self
+    }
     async fn read_schedule_plaintext(&self) -> Result<crate::schedule::Schedule, ProviderError> {
         let mut auth = self.auth.lock().await;
-        let before = self.read_locked(&mut auth).await?;
+        self.read_raw_schedule(&mut auth).await?.clean()
+    }
+    async fn read_raw_schedule(
+        &self,
+        auth: &mut AuthState,
+    ) -> Result<super::ocstat_schedule_tcp::RawSchedule, ProviderError> {
+        let before = self.read_locked(auth).await?;
         if !before.online {
             return Err(ProviderError::Offline);
         }
@@ -398,10 +421,12 @@ impl Ocstat {
             .device_id
             .clone()
             .ok_or(ProviderError::DeviceNotFound)?;
-        let tcp_result =
-            super::ocstat_schedule_tcp::read(session.id, &session.token, &device, mode).await;
+        let tcp_result = self
+            .schedule_reader
+            .read(session.id, &session.token, &device, mode)
+            .await;
         let schedule = tcp_result?;
-        let after = self.read_locked(&mut auth).await?;
+        let after = self.read_locked(auth).await?;
         if !after.online
             || auth.device_id.as_deref() != Some(device.as_str())
             || auth
@@ -502,6 +527,15 @@ impl Ocstat {
     }
 }
 impl Provider for Ocstat {
+    fn read_schedule_preview(&self) -> ProviderFuture<'_, crate::schedule::Preview> {
+        Box::pin(self.schedule_snapshot())
+    }
+    fn save_schedule(
+        &self,
+        request: crate::schedule::SaveRequest,
+    ) -> ProviderFuture<'_, crate::schedule::SaveResult> {
+        Box::pin(self.save_schedule_checked(request))
+    }
     fn logout(&self) -> super::LogoutFuture<'_> {
         Box::pin(async move {
             let mut auth = self.auth.lock().await;
@@ -536,6 +570,9 @@ impl Provider for Ocstat {
             self.auth.lock().await.session = Some(session);
             self.read_device().await
         })
+    }
+    fn schedule_trial(&self, action: trial::Action) -> ProviderFuture<'_, trial::Status> {
+        Box::pin(self.run_schedule_trial(action))
     }
     fn read_schedule(&self) -> ProviderFuture<'_, crate::schedule::Schedule> {
         Box::pin(self.read_schedule_plaintext())
@@ -1016,11 +1053,41 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn all_schedule_patterns_preserve_auto_and_override_target_controls() {
+        // Android updateTemp uses work_mode only; grouping does not change
+        // the Auto -> temporary-override command. Unknown groupings still fail.
+        for program in ["0", "1", "2"] {
+            for (work, marker, observed) in [
+                ("0", b'0', Mode::Schedule),
+                ("1", b'1', Mode::TemporaryOverride),
+            ] {
+                let mut replies = mode_reads(work, program, marker);
+                replies.extend(mode_reads(work, program, marker));
+                replies.push(Ok(accepted()));
+                let (provider, fake) = write_fixture(replies);
+                authenticate_fake(&provider).await;
+                let state = provider.read().await.unwrap();
+                assert_eq!(state.mode, observed);
+                assert!(state.target_writable);
+                provider
+                    .send_target(1, 225.try_into().unwrap())
+                    .await
+                    .unwrap();
+                let calls = fake.calls.lock().unwrap();
+                let write = calls
+                    .iter()
+                    .find(|(e, _)| *e == Endpoint::SetTarget)
+                    .unwrap();
+                assert!(write.1.contains(&("work_mode", "1".into())));
+            }
+        }
+    }
+    #[tokio::test]
     async fn preflight_mode_changes_cannot_reuse_prior_writability() {
         for (work, program, marker) in [
             ("0", "1", b'1'),
             ("1", "1", b'0'),
-            ("0", "0", b'0'),
+            ("0", "3", b'0'),
             ("2", "1", b'2'),
             ("4", "1", b'4'),
             ("6", "1", b'6'),
@@ -1069,7 +1136,7 @@ mod tests {
             ("work_mode", "0".into(), ProviderError::UnverifiedProtocol),
             (
                 "program_mode",
-                "0".into(),
+                "3".into(),
                 ProviderError::UnverifiedProtocol,
             ),
             (

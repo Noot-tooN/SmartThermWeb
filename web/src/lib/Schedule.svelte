@@ -19,6 +19,9 @@
     type Pattern,
     type Period,
     type Schedule,
+    type Preview,
+    saveRestriction,
+    regroupSchedule,
   } from './schedule';
   let {
     onExpired = () => {},
@@ -38,12 +41,123 @@
     weekly: newDraft('weekly'),
   });
   let loaded = $state(false);
+  let saving = $state(false);
+  let saveMessage = $state('');
+  let needsCheck = $state(false);
+  let saveBlocked = $state(false);
+  let saveSupported = $state(false);
+  let serverBaseline = $state<Schedule | null>(null);
+  let saveRequest: AbortController | null = null;
+  const restriction = $derived.by(() => {
+    if (!live) return 'Draft only';
+    if (!loaded || !serverBaseline) return '';
+    if (saveBlocked) return '';
+    if (!saveSupported)
+      return 'Saving is unavailable until the server schedule can be verified.';
+    return saveRestriction(drafts[pattern]);
+  });
+  function acceptSaved(preview: Preview) {
+    const draft = draftFromPreview(preview);
+    serverBaseline = copy(preview.schedule);
+    saveSupported = preview.can_save;
+    saveBlocked = needsCheck = !!preview.save_pending;
+    drafts[draft.pattern] = draft;
+    baselines[draft.pattern] = copy(draft);
+    pattern = loadedPattern = activePattern = draft.pattern;
+    visitedPatterns = new Set([draft.pattern]);
+    history = [];
+    generation++;
+    clearTimeout(timer);
+    request?.abort();
+    validationError = false;
+    error = '';
+    changeGroup(groups[pattern][0]);
+    dismiss();
+  }
+  async function saveSchedule(checkOnly = false) {
+    if (saving || loading || !serverBaseline) return;
+    if (!checkOnly && (!dirty || restriction || saveBlocked || !saveSupported))
+      return;
+    const desired = normalizeSchedule(copy(drafts[pattern]));
+    saving = true;
+    saveMessage = checkOnly ? 'Checking server…' : 'Saving…';
+    dismiss();
+    presetsOpen = false;
+    const controller = new AbortController();
+    saveRequest = controller;
+    try {
+      const response = await fetch('/api/thermostat/schedule', {
+        method: checkOnly ? 'GET' : 'PUT',
+        ...(checkOnly
+          ? {}
+          : {
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                baseline: serverBaseline,
+                schedule: desired,
+              }),
+            }),
+        signal: AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(checkOnly ? 45000 : 380000),
+        ]),
+      });
+      if (controller.signal.aborted) return;
+      if (response.status === 401) {
+        onExpired();
+        return;
+      }
+      if (!response.ok)
+        throw new Error(
+          'Save status is unknown. Check the server before continuing. Your draft is kept.',
+        );
+      const result = await response.json();
+      if (controller.signal.aborted) return;
+      const current: Preview | undefined = checkOnly ? result : result.current;
+      if (current) activePattern = current.schedule.pattern;
+      if (
+        current &&
+        !current.save_pending &&
+        JSON.stringify(current.schedule) === JSON.stringify(desired) &&
+        (checkOnly || result.status === 'accepted')
+      ) {
+        acceptSaved(current);
+        saveMessage = 'Accepted by server';
+      } else {
+        saveBlocked = needsCheck = true;
+        const accepted =
+          !checkOnly && result.accepted_groups?.length
+            ? `Accepted: ${result.accepted_groups.map((g: Group) => labels[g]).join(', ')}. `
+            : '';
+        saveMessage =
+          accepted +
+          (checkOnly
+            ? current?.save_pending
+              ? 'Save still unverified. Your draft is kept; nothing was resent.'
+              : 'The server differs from your draft. Reload to review it; your edits are kept until then.'
+            : result.message);
+      }
+    } catch (caught) {
+      if (!controller.signal.aborted) {
+        saveBlocked = needsCheck = true;
+        saveMessage =
+          caught instanceof Error && caught.name === 'Error'
+            ? caught.message
+            : 'Save status is unknown. Check the server before continuing. Your draft is kept.';
+      }
+    } finally {
+      if (!controller.signal.aborted) saving = false;
+    }
+  }
+
   let loading = $state(false);
   let loadError = $state('');
   let loadedPattern = $state<Pattern>('daily');
+  let activePattern = $state<Pattern>('daily');
+  let visitedPatterns = new Set<Pattern>();
   let loadRequest: AbortController | null = null;
-  async function loadSchedule() {
-    if (loading || (loaded && dirty)) return;
+  async function loadSchedule(discardEdits = false) {
+    if (loading || saving || (loaded && dirty && !discardEdits)) return;
     loading = true;
     loadError = '';
     const controller = new AbortController();
@@ -65,6 +179,12 @@
       const preview = await response.json();
       if (controller.signal.aborted) return;
       const draft = draftFromPreview(preview);
+      serverBaseline = copy(preview.schedule);
+      saveSupported = !!preview.can_save;
+      saveBlocked = needsCheck = !!preview.save_pending;
+      saveMessage = preview.save_pending
+        ? 'A previous save is still unverified. Check the server before continuing.'
+        : '';
       generation++;
       clearTimeout(timer);
       request?.abort();
@@ -78,7 +198,8 @@
       };
       drafts[draft.pattern] = draft;
       baselines = copy(drafts);
-      pattern = loadedPattern = draft.pattern;
+      pattern = loadedPattern = activePattern = draft.pattern;
+      visitedPatterns = new Set([draft.pattern]);
       changeGroup(groups[pattern][0]);
       dismiss();
       loaded = true;
@@ -115,7 +236,7 @@
   const dirty = $derived(
     live && loaded
       ? pattern !== loadedPattern ||
-          JSON.stringify(drafts) !== JSON.stringify(baselines)
+          JSON.stringify(drafts[pattern]) !== JSON.stringify(baselines[pattern])
       : JSON.stringify(drafts[pattern]) !== JSON.stringify(baselines[pattern]),
   );
   function registerTimeline(node: HTMLDivElement, group: Group) {
@@ -195,6 +316,10 @@
     );
   }
   function changePattern(value: Pattern) {
+    if (live && loaded && !visitedPatterns.has(value)) {
+      drafts[value] = regroupSchedule(drafts[pattern], value);
+      visitedPatterns.add(value);
+    }
     pattern = value;
     presetsOpen = false;
     changeGroup(groups[pattern][0]);
@@ -202,6 +327,7 @@
     checkDraft();
   }
   function checkDraft() {
+    if (!saveBlocked) saveMessage = '';
     const version = ++generation;
     clearTimeout(timer);
     request?.abort();
@@ -517,6 +643,7 @@
   });
   onDestroy(() => {
     loadRequest?.abort();
+    saveRequest?.abort();
     generation++;
     clearTimeout(timer);
     request?.abort();
@@ -527,22 +654,22 @@
 <section
   class="schedule-panel"
   aria-labelledby="schedule-title"
-  aria-busy={live && (loading || (!loaded && !loadError))}
+  aria-busy={saving || (live && (loading || (!loaded && !loadError)))}
 >
   <header class="schedule-heading">
     <h2 id="schedule-title">
-      Schedule <small
-        title="Drafts are cleared when you leave or refresh. No thermostat settings are changed."
-        >Draft only</small
-      >
+      Schedule {#if !live}<small
+          title="Drafts are cleared when you leave or refresh."
+          >Draft only</small
+        >{/if}
     </h2>
     {#if live}<button
         class="quiet reload-schedule"
-        disabled={!loaded || loading || dirty}
+        disabled={!loaded || loading || saving || dirty}
         title={dirty
           ? 'Discard edits before reloading'
           : 'Reload schedule from server'}
-        onclick={loadSchedule}
+        onclick={() => loadSchedule()}
         ><span aria-hidden="true">↻</span> Reload schedule</button
       >{/if}
   </header>
@@ -589,20 +716,22 @@
                 <button class="save skeleton-shape" disabled
                   >Save schedule</button
                 >
-                <small class="skeleton-shape">Saving isn’t available yet</small>
+                <small class="skeleton-shape">Checking availability…</small>
               </div>
             </div>
           </div>
         </div>
         {#if loadError}<div class="load-failure" role="alert">
             <p>{loadError}</p>
-            <button class="quiet" onclick={loadSchedule}>Retry load</button>
+            <button class="quiet" onclick={() => loadSchedule()}
+              >Retry load</button
+            >
           </div>{/if}
       </div>
     {/if}
     {#if !live || loaded}
       <div class="toolbar">
-        <fieldset class="pattern-picker" disabled={loading}>
+        <fieldset class="pattern-picker" disabled={loading || saving}>
           <legend class="sr-only">Schedule pattern</legend>
           <span id="schedule-current-mode" class="sr-only"
             >Current schedule mode last read from the server</span
@@ -616,7 +745,7 @@
                 aria-label={choice.label}
                 aria-describedby={live &&
                 loaded &&
-                choice.value === loadedPattern
+                choice.value === activePattern
                   ? 'schedule-current-mode'
                   : undefined}
                 checked={pattern === choice.value}
@@ -626,7 +755,7 @@
                   class="mode-marker"
                   class:is-current={live &&
                     loaded &&
-                    choice.value === loadedPattern}
+                    choice.value === activePattern}
                   aria-hidden="true">● Active</small
                 ></span
               ></label
@@ -634,7 +763,7 @@
           {/each}
         </fieldset>
       </div>
-      <div class="schedule-editor" inert={loading}>
+      <div class="schedule-editor" inert={loading || saving}>
         {#each drafts[pattern].groups as row (row.group)}
           {@const active = selected === row.group}
           {@const rowBlocks = periods(row.changes)}
@@ -948,10 +1077,47 @@
             >
           </div>
           <div class="save-area">
-            <button class="save" disabled aria-describedby="schedule-save-note"
-              >Save schedule</button
+            <button
+              class="save"
+              disabled={!live ||
+                !loaded ||
+                !dirty ||
+                saving ||
+                loading ||
+                !!restriction ||
+                saveBlocked ||
+                !saveSupported ||
+                validationError}
+              aria-describedby="schedule-save-note"
+              onclick={() => saveSchedule()}
+              >{saving ? 'Working…' : 'Save schedule'}</button
             >
-            <small id="schedule-save-note">Saving isn’t available yet</small>
+            <small
+              id="schedule-save-note"
+              role={saveMessage ? 'status' : undefined}
+              >{saveMessage ||
+                (dirty
+                  ? restriction ||
+                    (pattern !== activePattern
+                      ? 'Switching grouping activates its stored schedule before the new periods are saved.'
+                      : '')
+                  : '')}</small
+            >
+            {#if needsCheck}
+              <div class="recovery-actions">
+                <button
+                  class="quiet"
+                  disabled={saving || loading}
+                  onclick={() => saveSchedule(true)}>Check server</button
+                >
+                <button
+                  class="quiet"
+                  disabled={saving || loading}
+                  onclick={() => loadSchedule(true)}
+                  >Reload and discard edits</button
+                >
+              </div>
+            {/if}
           </div>
         </div>
       </div>
@@ -959,7 +1125,7 @@
           {loadError}<button
             class="quiet"
             disabled={loading || dirty}
-            onclick={loadSchedule}>Retry load</button
+            onclick={() => loadSchedule()}>Retry load</button
           >
         </p>{/if}
       {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -973,6 +1139,18 @@
 </section>
 
 <style>
+  #schedule-save-note {
+    min-height: 1.4em;
+    max-width: 38ch;
+    text-align: right;
+  }
+  .recovery-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
   .schedule-panel {
     position: relative;
     margin-top: 18px;

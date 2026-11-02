@@ -721,3 +721,203 @@ it('reserves a skeleton immediately, then keeps loaded timelines in place during
     container.querySelector('.schedule-panel')?.getAttribute('aria-busy'),
   ).toBe('false');
 });
+
+function savablePreview(changed = false) {
+  const preview = JSON.parse(JSON.stringify(loadedPreview()));
+  preview.can_save = true;
+  preview.save_pending = false;
+  if (changed) {
+    preview.schedule.groups[0].changes[0].target_temperature = 220;
+    preview.days
+      .slice(0, 5)
+      .forEach(
+        (d: { periods: { target_temperature: number }[] }) =>
+          (d.periods[1].target_temperature = 220),
+      );
+  }
+  return preview;
+}
+async function editWeekdayTemperature() {
+  const row = within(screen.getByRole('region', { name: 'Weekdays schedule' }));
+  await fireEvent.click(
+    row.getByRole('button', { name: '07:00 to 23:30, 21.5 degrees' }),
+  );
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Increase period temperature' }),
+  );
+  await vi.advanceTimersByTimeAsync(300);
+}
+const ok = (body: unknown) => ({
+  ok: true,
+  status: 200,
+  json: async () => body,
+});
+it('saves only on explicit click with the untouched baseline and resets undo after server acceptance', async () => {
+  let resolve!: (v: unknown) => void;
+  const fetch = vi
+    .fn()
+    .mockImplementation((_url: string, options?: RequestInit) => {
+      if (options?.method === 'PUT') return new Promise((r) => (resolve = r));
+      return Promise.resolve(ok(savablePreview()));
+    });
+  vi.stubGlobal('fetch', fetch);
+  render(Schedule, { live: true });
+  await vi.advanceTimersByTimeAsync(0);
+  await editWeekdayTemperature();
+  const button = screen.getByRole('button', {
+    name: 'Save schedule',
+  }) as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  expect(
+    fetch.mock.calls.filter(([, options]) => options?.method === 'PUT'),
+  ).toHaveLength(0);
+  await fireEvent.click(button);
+  expect(button.disabled).toBe(true);
+  await fireEvent.click(button);
+  const puts = fetch.mock.calls.filter(
+    ([, options]) => options?.method === 'PUT',
+  );
+  expect(puts).toHaveLength(1);
+  const body = JSON.parse(puts[0][1].body);
+  expect(body.baseline).toEqual(savablePreview().schedule);
+  expect(body.schedule).toEqual(savablePreview(true).schedule);
+  resolve(
+    ok({
+      status: 'accepted',
+      accepted_groups: ['weekdays'],
+      current: savablePreview(true),
+      message: 'Accepted by server',
+    }),
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByText('Accepted by server')).toBeTruthy();
+  expect(
+    (screen.getByRole('button', { name: '↶ Undo' }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(
+    (screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+});
+it('keeps edits after a lost save reply and checks with GET without ever resending', async () => {
+  let readback = savablePreview();
+  const fetch = vi
+    .fn()
+    .mockImplementation((_url: string, options?: RequestInit) =>
+      options?.method === 'PUT'
+        ? Promise.reject(new TypeError('network error'))
+        : Promise.resolve(ok(readback)),
+    );
+  vi.stubGlobal('fetch', fetch);
+  render(Schedule, { live: true });
+  await vi.advanceTimersByTimeAsync(0);
+  await editWeekdayTemperature();
+  await fireEvent.click(screen.getByRole('button', { name: 'Save schedule' }));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(
+    screen.getByRole('button', { name: '07:00 to 23:30, 22.0 degrees' }),
+  ).toBeTruthy();
+  expect(
+    (screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByText(/server differs from your draft/)).toBeTruthy();
+  readback = savablePreview(true);
+  await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByText('Accepted by server')).toBeTruthy();
+  expect(
+    fetch.mock.calls.filter(([, options]) => options?.method === 'PUT'),
+  ).toHaveLength(1);
+});
+it('keeps a conflicting draft and requires an explicit discard before loading a replacement', async () => {
+  const fetch = vi
+    .fn()
+    .mockImplementation((_url: string, options?: RequestInit) =>
+      Promise.resolve(
+        ok(
+          options?.method === 'PUT'
+            ? {
+                status: 'conflict',
+                accepted_groups: [],
+                current: savablePreview(),
+                message: 'Server schedule changed. Your draft is kept.',
+              }
+            : savablePreview(),
+        ),
+      ),
+    );
+  vi.stubGlobal('fetch', fetch);
+  render(Schedule, { live: true });
+  await vi.advanceTimersByTimeAsync(0);
+  await editWeekdayTemperature();
+  await fireEvent.click(screen.getByRole('button', { name: 'Save schedule' }));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(
+    screen.getByRole('button', { name: '07:00 to 23:30, 22.0 degrees' }),
+  ).toBeTruthy();
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Reload and discard edits' }),
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(
+    screen.queryByRole('button', { name: '07:00 to 23:30, 22.0 degrees' }),
+  ).toBeNull();
+});
+
+it('allows time and grouping edits and submits the full desired schedule with its original baseline', async () => {
+  let submitted: any;
+  const fetch = vi
+    .fn()
+    .mockImplementation((_url: string, options?: RequestInit) => {
+      if (options?.method === 'PUT') {
+        submitted = JSON.parse(options.body as string);
+        return Promise.resolve(
+          ok({
+            status: 'unverified',
+            accepted_groups: [],
+            message: 'Grouping changed; period save unverified.',
+            current: {
+              ...savablePreview(),
+              schedule: submitted.schedule,
+              save_pending: true,
+            },
+          }),
+        );
+      }
+      return Promise.resolve(ok(savablePreview()));
+    });
+  vi.stubGlobal('fetch', fetch);
+  render(Schedule, { live: true });
+  await vi.advanceTimersByTimeAsync(0);
+  const row = within(screen.getByRole('region', { name: 'Weekdays schedule' }));
+  await fireEvent.keyDown(row.getByRole('slider', { name: 'Boundary 1' }), {
+    key: 'ArrowRight',
+  });
+  await vi.advanceTimersByTimeAsync(300);
+  expect(
+    (screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+  await fireEvent.click(screen.getByRole('radio', { name: 'Every day' }));
+  await vi.advanceTimersByTimeAsync(300);
+  expect(
+    screen.getByRole('button', { name: '07:30 to 23:30, 21.5 degrees' }),
+  ).toBeTruthy();
+  expect(screen.getByText(/Switching grouping activates/)).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Save schedule' }));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(submitted.baseline).toEqual(savablePreview().schedule);
+  expect(submitted.schedule.pattern).toBe('daily');
+  expect(submitted.schedule.groups[0].changes[0].start_minute).toBe(450);
+  expect(
+    screen
+      .getByRole('radio', { name: 'Every day' })
+      .closest('label')
+      ?.querySelector('.mode-marker.is-current'),
+  ).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Check server' })).toBeTruthy();
+});

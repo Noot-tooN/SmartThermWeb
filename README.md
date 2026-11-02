@@ -83,7 +83,7 @@ The single-device UI discovers exactly one returned thermostat and pins it for s
 
 After explicit login, the worker polls every 30 seconds after each read completes. Each HTTPS request has a 10-second timeout; the controller allows 35 seconds for login plus listing and status. Explicit authentication rejection returns to the login form. Browser login attempts are limited globally to one per 10 seconds, with one in progress at a time and at most 32 sessions. Failed login requests are never retried in the background; ordinary read transport failures preserve the last reading and retry with the existing token.
 
-After sign-in, temperature controls are enabled when the thermostat is online, `program_mode=1`, and list/status agree on Auto (`0`) or temporary override (`1`). Each write rechecks that context and sends `work_mode=1`: adjusting from Auto starts a temporary override, while further adjustments update it, following the inspected Android code. Override expiry is not yet verified. The original physical round trip tested an existing override; the Auto-to-override path is covered by fixture tests but has not had a separate physical trial. Unsupported modes and failed reads disable controls; use the Android app for mode/schedule changes. `PUT /api/thermostat/target` requires the same-origin browser session. Temperature controls do not use TCP 8800; schedule loading uses a separate read-only connection with a fresh client identifier.
+After sign-in, temperature controls are enabled when the thermostat is online, `program_mode` is 0, 1, or 2 (the three schedule groupings), and list/status agree on Auto (`0`) or temporary override (`1`). Each write rechecks that context and sends `work_mode=1`: adjusting from Auto starts a temporary override, while further adjustments update it, following the inspected Android code. Override expiry is not yet verified. The original physical round trip tested an existing override; the Auto-to-override path is covered by fixture tests but has not had a separate physical trial. Unsupported modes and failed reads disable controls; use the Android app for heating operating-mode changes. `PUT /api/thermostat/target` requires the same-origin browser session. Temperature controls do not use TCP 8800; schedule loading uses a separate read-only connection with a fresh client identifier.
 
 The app permits 5–35°C in 0.5°C steps, matching the type-22 control screen in the inspected Android APK. This confirms the official client's bounds, not firmware enforcement or physical endpoint testing. Individual targets outside the live-tested 21.5–22.5°C round trip have not all been physically tested. Repeated edits coalesce, failures retain the desired target, and there is no automatic resend.
 
@@ -96,7 +96,7 @@ Each read combines the device list with a validated, device-matched status frame
 - State, command IDs, and latest per-browser revision counters live in memory and reset on restart. A fresh server session ID lets the browser distinguish resets from stale updates. At most 256 browser client IDs are tracked per process; restart the local simulator if that limit is reached.
 - In simulator mode, full snapshots keep the API simple. Only the latest user command and active command are retained, not an audit history. Polling is every 500 ms outside a write request. Writes wait up to 3 seconds for a server reply and then up to 6 seconds for application. Background reconciliation continues after that deadline.
 - Simulator observations include reliable application correlation and monotonic revisions. OCSTAT may not offer either; do not fabricate these guarantees in a future adapter.
-- Live schedule writes, mode changes, shared/remote access control, token persistence, Nix, and deployment infrastructure are deferred.
+- Shared/remote access control, token persistence, Nix, and deployment infrastructure are deferred.
 
 Before enabling real writes, obtain evidence linking reported state to physical device application and verify message IDs and mode/schedule effects. Writes require a separately approved experiment and implementation. Never commit raw captures or credentials.
 
@@ -120,7 +120,7 @@ Verified device feedback can be added through the existing provider contract: `a
 ## Schedule work
 
 Opening **Schedule** loads the server-stored active schedule for the signed-in device.
-Edits remain local drafts; Save is disabled. The simulator keeps its sample draft editor. Choose a repeating pattern: one row for every day, two rows for weekdays/weekends,
+Edits stay local until **Save schedule**. Saving supports temperatures, time boundaries, adding/removing periods, and all three repeating patterns. The simulator keeps its sample draft editor. Choose a repeating pattern: one row for every day, two rows for weekdays/weekends,
 or seven rows for individual days. All rows remain visible, each with subtle hour markers inside its timeline.
 The shared draft actions stick to the viewport bottom while scrolling within the editor.
 Select a block or drag a range on any row,
@@ -128,13 +128,13 @@ and set its temperature. Drag boundaries (30-minute snapping), use the arrow-key
 controls, or open the time label for exact 10-minute times. Adjacent equal temperatures merge; edits
 that exceed six changes are rejected without altering the draft. Undo reverses
 each completed edit across rows. Discard changes restores the loaded schedule and its pattern (or resets the current simulator draft);
-Save schedule remains disabled until live integration is verified. A hover marker shows the snapped time, and pending selections
+Save checks the loaded baseline against a fresh read and verifies each changed group before continuing. A hover marker shows the snapped time, and pending selections
 have draggable start/end handles before applying. Temperature controls appear in
 a compact popover attached to the bar. Rust validation runs automatically after
 edits; redundant midnight anchors do not consume a change.
 Rust validates the draft and computes overnight periods. Drafts remain in page
 memory while switching patterns; leaving, refreshing, or signing out clears them.
-No schedule save request exists and previewing never changes the thermostat.
+Previewing never changes the thermostat. Only the explicit Save action sends schedule writes.
 
 Pattern selection uses a keyboard-accessible segmented control. **Choose a preset**
 shows Winter day, Morning & evening, and Summer examples with their exact hours and
@@ -151,7 +151,7 @@ structure, time/temperature ranges and complete groups are checked; HTTPS status
 reads bracket the fetch to reject a changed mode or offline device. These checks
 do not prove an atomic snapshot or physical application. Reload is manual and
 disabled while edits exist. Mixed overnight temperatures within a grouped row
-are rejected rather than flattened incorrectly. Live schedule writes remain unverified. See [the feature backlog](docs/feature-backlog.md) and
+are rejected rather than flattened incorrectly. Existing-period temperature writes passed the controlled server round trip. See [the feature backlog](docs/feature-backlog.md) and
 [preview API](docs/api.md#schedule-draft-preview).
 
 Schedule stays expanded and loads after sign-in. A reduced-motion-aware skeleton
@@ -159,3 +159,74 @@ reserves the two-row layout during the initial fetch; reloads retain existing
 content. The selector marks the mode last read from the server independently of
 the selected draft. Changeover times share one line, with guide lines when labels
 need spacing. Narrow periods expose exact times and temperatures in their editor.
+
+### Controlled web schedule-save trial
+
+The APK-derived investigation trial is opt-in and
+limited to an existing weekend period in 5+2 mode: +0.5°C, then explicit
+restoration. No time, mode, or disabled-slot changes are supported by the trial.
+
+Set `SMARTTHERM_SCHEDULE_TRIAL_DIR` to an absolute private directory (0700) when
+starting the OCSTAT server. Visit `/schedule-trial` after signing in through the
+normal app. Prepare performs reads only and shows the exact proposed change.
+Apply requires confirmation of the temporary +0.5°C change, which may affect
+active heating; Restore is separate.
+All calls use the existing browser session and controller worker. Writes use
+HTTPS `setProgrammeByDay`, with no HTTP fallback; read-back uses the approved TCP
+schedule reader. The HTTP reply alone never marks a trial successful.
+
+The directory holds a 0600 `schedule-trial.json` recovery backup with device/account
+identity and the original six slots, but no password or token. Keep it private,
+outside Git, and retain it until restoration is verified. Restart with the same
+directory and sign in to the same account to resume Check/Restore. Only one trial
+can be active per server; no automatic retries or rollbacks run. An uncertain
+Apply/Restore must be checked rather than resent. An external schedule edit can
+block restoration to avoid overwriting it. Preflight comparisons reduce but cannot
+eliminate upstream races. Server read-back does not confirm physical execution.
+
+### Verified schedule saves
+
+The owner completed the weekend 07:00 trial, 21.5 → 22.0 → 21.5°C, and a
+subsequent read confirmed restoration of all six original weekend slots with
+the existing weekday/weekend mode. This establishes server storage, not physical
+thermostat application. Weekday writes use the same inspected six-slot endpoint
+and mapping (day 8); the live trial used weekends (day 9).
+
+Normal Save maps the validated draft into six manufacturer slots per group.
+Removing a period disables its old slot; adding a period reuses a disabled slot.
+Unused slots retain their data. Pattern/day codes stay inside Rust.
+It compares a fresh schedule with the loaded baseline, sends changed groups
+serially over HTTPS, and requires exact slot readback. A conflict or uncertain
+outcome stops remaining groups. There is no automatic retry or rollback.
+
+The editor retains its draft after failures. **Check server** reads only; a full
+match clears the draft as **Accepted by server**. Otherwise, **Reload and discard
+edits** explicitly loads the current server schedule. Partial acceptance names
+the groups already verified. Normal pending-write tracking survives canceled
+requests and browser logout within the running server, but is memory-only; server
+restarts never resume writes. After a restart, inspect the freshly loaded schedule
+before editing again. Unlike the restricted trial, normal saves do not have a
+persistent recovery backup. External-client races cannot be eliminated because
+OCSTAT offers no verified conditional-write or atomic whole-week operation.
+
+### Full schedule editing
+
+Save now supports every day, weekdays/weekends, and individual days, including
+new/deleted periods and 10-minute boundary edits (dragging still snaps to 30 min).
+The APK mapping uses six slots, disables deleted start times with +2880, reuses
+inactive slots for new starts, and sorts the resulting array before submission.
+These paths have local transport/encoder tests; the earlier real server trial
+verified an existing weekend temperature edit, not a full grouping round trip.
+
+Grouping changes use HTTPS `setProgrammeModeNew`, with a distinct message ID,
+then require a complete read of the new grouping before sending period updates.
+The previously stored schedule for that grouping can become active immediately;
+the Save area explains this when grouping differs from the observed server mode.
+This is not an atomic switch of the entire week. Failed/unverified steps stop
+remaining operations and never trigger an automatic retry or rollback.
+The active badge follows the latest observed server grouping even after partial
+failure. Newly selected groupings start from the visible draft; a merged group
+uses its first day (Monday for every day/weekdays, Saturday for weekends), shown
+before Save. Previously edited alternate drafts remain available while editing.
+
+Target controls remain available after grouping changes in Auto/temporary override. The APK temperature action depends on heating work mode, not schedule grouping; unknown groupings or disagreeing work/status modes still fail closed.

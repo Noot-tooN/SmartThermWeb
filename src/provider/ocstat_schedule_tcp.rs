@@ -8,7 +8,18 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-type Slots = [[u16; 2]; 6];
+pub(super) type Slots = [[u16; 2]; 6];
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RawSchedule {
+    pub mode: u8,
+    pub slots: BTreeMap<u8, Slots>,
+}
+impl RawSchedule {
+    pub fn clean(&self) -> Result<Schedule, ProviderError> {
+        schedule(self.mode, self.slots.clone())
+    }
+}
 fn invalid() -> ProviderError {
     ProviderError::InvalidResponse
 }
@@ -112,7 +123,7 @@ pub(super) async fn read(
     token: &str,
     device: &str,
     mode: u8,
-) -> Result<Schedule, ProviderError> {
+) -> Result<RawSchedule, ProviderError> {
     if device.len() != 12
         || !device
             .bytes()
@@ -137,7 +148,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     device: &str,
     mode: u8,
     required: &[u8],
-) -> Result<Schedule, ProviderError> {
+) -> Result<RawSchedule, ProviderError> {
     socket
         .write_all(registration.as_bytes())
         .await
@@ -197,7 +208,9 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             }
         }
         if required.iter().all(|day| slots.contains_key(day)) {
-            return schedule(mode, slots);
+            let raw = RawSchedule { mode, slots };
+            raw.clean()?;
+            return Ok(raw);
         }
     }
 }
@@ -248,7 +261,7 @@ mod tests {
         };
         let read = exchange(&mut client, &registration, "(ESTDEVICE01", 1, &[8, 9]);
         let (result, ()) = tokio::join!(read, serve);
-        assert_eq!(result.unwrap().groups.len(), 2);
+        assert_eq!(result.unwrap().clean().unwrap().groups.len(), 2);
     }
     #[tokio::test(start_paused = true)]
     async fn truncated_stream_is_not_a_successful_schedule() {

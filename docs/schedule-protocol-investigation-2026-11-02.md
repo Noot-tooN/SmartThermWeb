@@ -150,3 +150,55 @@ The first web save should support changed groups in that same mode, check for
 baseline conflicts, serialize writes, and report partial or uncertain outcomes
 without automatic retries. Pattern switching remains a separate feature until
 its activation order and readback have been verified.
+
+## APK-based web trial alternative
+
+At the owner's request, a new Android capture is no longer a prerequisite for
+the first trial. `EditAddScheduleActivity.submit` and `ProgrammeBean.toProgramme`
+provide the full six-slot form serialization. A restricted opt-in web page now
+prepares an exact-slot backup, edits one existing weekend temperature, and offers
+explicit Apply/Check/Restore through the Rust controller. This tests the known
+encoding without guessing insertion/deletion or mode-switch semantics. HTTP
+success alone is ignored as acceptance evidence; fresh server slot read-back is
+required. No live schedule write has been performed as part of implementation.
+Normal Save remains disabled until a real round trip has been inspected.
+
+
+## Completed owner-operated web trial and normal-save scope
+
+The owner used Prepare, Apply, Restore, and Check. The retained trial phase was
+`restored`: the weekend period starting at 07:00 changed from 21.5°C to 22.0°C and
+back. A subsequent read-only Check reported an exact match with the restored
+six-slot weekend group and unchanged mode 1. No additional write was sent during
+inspection. This is server readback evidence, not physical application evidence.
+
+Normal saves now support temperature edits in existing weekday/weekend periods.
+Weekdays use the same APK endpoint with day=8; the live test exercised day=9.
+Disabled entries and every time boundary are preserved. Start-time changes,
+insertion/deletion and pattern changes remain disabled for live saves.
+
+Further offline APK inspection confirms addition reuses an inactive slot (preferring
+the matching old time), deletion adds 2880 to the start, and edits sort six slots.
+Mode switching is still a separate request. These paths need controlled live
+readback/restoration trials before their write gates are opened. The editor can
+continue drafting them; Rust independently rejects them at Save.
+
+
+## Expanded editing implementation
+
+The owner requested removal of the time/layout/grouping save restrictions.
+The local APK supplies the encoder rules: `EditAddScheduleActivity.addSchedule`
+reuses inactive entries (preferring a matching disabled start), `submit` sorts
+all six slots, `ScheduleAddFragment` deletion adds 2880, and
+`HeatAddFragmentActivity.switchProgrammeMode` sends mode plus its first day.
+Rust now follows these rules for full draft saves. A grouping change is sent
+first, followed by a complete new-mode read, then serial changed-group writes.
+HTTP success alone never advances a step; readback must match.
+
+An unauthenticated HTTPS GET to `setProgrammeModeNew` returned 200, verifying
+route reachability only. No credentials or command parameters were sent. This
+is not an authenticated mode-write test. Local fake-transport tests cover all
+mode transitions, six-slot insertion/deletion/replacement, restoration, lost
+replies and partial failures. No live thermostat change was made in this work.
+The UI explains transient activation of the old stored schedule during grouping
+changes; new-mode and slot-layout paths still need observation during normal use.

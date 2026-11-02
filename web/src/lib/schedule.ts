@@ -37,7 +37,8 @@ export interface Schedule {
 }
 export interface Preview {
   schedule: Schedule;
-  can_save: false;
+  can_save: boolean;
+  save_pending?: boolean;
   days: {
     day: Day;
     periods: {
@@ -280,3 +281,42 @@ export const schedulePresets: SchedulePreset[] = [
     changes: [{ start_minute: 0, target_temperature: 180 }],
   },
 ];
+
+/** Seed a newly selected grouping from the visible draft, never a sample schedule.
+ * A combined row uses its first day; the user reviews the resulting row before Save.
+ */
+export function regroupSchedule(source: Schedule, pattern: Pattern): Schedule {
+  const sourceGroup = (day: number) =>
+    source.pattern === 'daily'
+      ? 'every_day'
+      : source.pattern === 'weekday_weekend'
+        ? day < 5
+          ? 'weekdays'
+          : 'weekends'
+        : days[day];
+  return {
+    pattern,
+    groups: groups[pattern].map((group) => {
+      const day =
+        group === 'every_day' || group === 'weekdays'
+          ? 0
+          : group === 'weekends'
+            ? 5
+            : days.indexOf(group);
+      const changes = source.groups.find(
+        (g) => g.group === sourceGroup(day),
+      )!.changes;
+      return { group, changes: changes.map((c) => ({ ...c })) };
+    }),
+  };
+}
+export function saveRestriction(draft: Schedule): string {
+  try {
+    normalizeSchedule(draft);
+  } catch (error) {
+    return error instanceof Error
+      ? error.message
+      : 'Check the schedule before saving.';
+  }
+  return '';
+}

@@ -1,6 +1,6 @@
 use smartthermweb::sessions::Sessions;
 use smartthermweb::{
-    api::{AppState, router},
+    api::{AppState, router_with_schedule_trial},
     controller::{Controller, Timing},
     provider::{
         Provider,
@@ -18,6 +18,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !address.ip().is_loopback() {
         return Err("This local build must bind to a loopback address.".into());
     }
+    let trial = std::env::var_os("SMARTTHERM_SCHEDULE_TRIAL_DIR")
+        .map(|directory| {
+            smartthermweb::provider::ocstat::trial::TrialStore::open(std::path::Path::new(
+                &directory,
+            ))
+            .map(Arc::new)
+        })
+        .transpose()?;
+    let trial_enabled = trial.is_some();
     let (provider, simulator, controller, sessions): (Option<Arc<dyn Provider>>, _, _, _) =
         match provider_name.as_str() {
             "simulator" => {
@@ -40,7 +49,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 None,
                 Controller::ocstat_read_only(),
-                Some(Arc::new(Sessions::new())),
+                Some(Arc::new(Sessions::with_factory(Arc::new(move || {
+                    let provider = smartthermweb::provider::ocstat::Ocstat::new()
+                        .map_err(|_| smartthermweb::provider::ProviderError::Transport)?;
+                    Ok(Arc::new(match &trial {
+                        Some(store) => provider.with_schedule_trial(store.clone()),
+                        None => provider,
+                    }))
+                })))),
             ),
             _ => return Err("SMARTTHERM_PROVIDER must be simulator or ocstat.".into()),
         };
@@ -53,11 +69,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     axum::serve(
         listener,
-        router(AppState {
-            controller,
-            simulator,
-            sessions,
-        }),
+        router_with_schedule_trial(
+            AppState {
+                controller,
+                simulator,
+                sessions,
+            },
+            trial_enabled,
+        ),
     )
     .with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;

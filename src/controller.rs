@@ -12,7 +12,34 @@ use tokio::{
     time::{Instant, sleep, timeout},
 };
 
-type ScheduleReply = oneshot::Sender<Result<crate::schedule::Schedule, ProviderError>>;
+use crate::provider::ocstat::trial::{Action as TrialAction, Status as TrialStatus};
+enum ScheduleJob {
+    Read(ScheduleReply),
+    Save(
+        crate::schedule::SaveRequest,
+        oneshot::Sender<Result<crate::schedule::SaveResult, ProviderError>>,
+    ),
+    Trial(
+        TrialAction,
+        oneshot::Sender<Result<TrialStatus, ProviderError>>,
+    ),
+}
+impl ScheduleJob {
+    fn reject(self) {
+        match self {
+            Self::Read(reply) => {
+                let _ = reply.send(Err(ProviderError::LoginRequired));
+            }
+            Self::Save(_, reply) => {
+                let _ = reply.send(Err(ProviderError::LoginRequired));
+            }
+            Self::Trial(_, reply) => {
+                let _ = reply.send(Err(ProviderError::LoginRequired));
+            }
+        }
+    }
+}
+type ScheduleReply = oneshot::Sender<Result<crate::schedule::Preview, ProviderError>>;
 
 struct Core {
     state: Snapshot,
@@ -22,7 +49,7 @@ struct Core {
     clients: HashMap<String, u64>,
     pending_login: Option<(String, String)>,
     pending_logout: bool,
-    pending_schedule: Option<ScheduleReply>,
+    pending_schedule: Option<ScheduleJob>,
     schedule_loading: bool,
     next_login: Instant,
 }
@@ -111,7 +138,7 @@ impl Controller {
             wake: Arc::new(Notify::new()),
         }
     }
-    pub async fn read_schedule(&self) -> Result<crate::schedule::Schedule, ProviderError> {
+    pub async fn read_schedule(&self) -> Result<crate::schedule::Preview, ProviderError> {
         let (sender, receiver) = oneshot::channel();
         {
             let mut core = self.core.lock().unwrap();
@@ -122,27 +149,57 @@ impl Controller {
                 return Err(ProviderError::Transport);
             }
             core.schedule_loading = true;
-            core.pending_schedule = Some(sender);
+            core.pending_schedule = Some(ScheduleJob::Read(sender));
         }
         self.wake.notify_one();
         receiver.await.unwrap_or(Err(ProviderError::LoginRequired))
     }
-    fn take_schedule(&self) -> Option<ScheduleReply> {
+    pub async fn schedule_trial(&self, action: TrialAction) -> Result<TrialStatus, ProviderError> {
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut core = self.core.lock().unwrap();
+            if core.state.login != Some(LoginState::Ready) || core.pending_logout {
+                return Err(ProviderError::LoginRequired);
+            }
+            if core.schedule_loading {
+                return Err(ProviderError::Transport);
+            }
+            core.schedule_loading = true;
+            core.pending_schedule = Some(ScheduleJob::Trial(action, sender));
+        }
+        self.wake.notify_one();
+        receiver.await.unwrap_or(Err(ProviderError::LoginRequired))
+    }
+    pub async fn save_schedule(
+        &self,
+        request: crate::schedule::SaveRequest,
+    ) -> Result<crate::schedule::SaveResult, ProviderError> {
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut core = self.core.lock().unwrap();
+            if core.state.login != Some(LoginState::Ready) || core.pending_logout {
+                return Err(ProviderError::LoginRequired);
+            }
+            if !core.writes_allowed {
+                return Err(ProviderError::ReadOnly);
+            }
+            if core.schedule_loading {
+                return Err(ProviderError::Transport);
+            }
+            core.schedule_loading = true;
+            core.pending_schedule = Some(ScheduleJob::Save(request, sender));
+        }
+        self.wake.notify_one();
+        receiver.await.unwrap_or(Err(ProviderError::LoginRequired))
+    }
+    fn take_schedule(&self) -> Option<ScheduleJob> {
         self.core.lock().unwrap().pending_schedule.take()
     }
-    async fn execute_schedule(
+    fn finish_schedule<T>(
         &self,
-        provider: &dyn Provider,
-        reply: ScheduleReply,
-        timing: Timing,
+        reply: oneshot::Sender<Result<T, ProviderError>>,
+        result: Result<T, ProviderError>,
     ) {
-        let result = if reply.is_closed() {
-            Err(ProviderError::Transport)
-        } else {
-            timeout(timing.request, provider.read_schedule())
-                .await
-                .unwrap_or(Err(ProviderError::Transport))
-        };
         let mut core = self.core.lock().unwrap();
         core.schedule_loading = false;
         let result = if core.pending_logout || core.state.login != Some(LoginState::Ready) {
@@ -151,6 +208,40 @@ impl Controller {
             result
         };
         let _ = reply.send(result);
+    }
+    async fn execute_schedule(&self, provider: &dyn Provider, job: ScheduleJob, timing: Timing) {
+        match job {
+            ScheduleJob::Read(reply) => {
+                let result = if reply.is_closed() {
+                    Err(ProviderError::Transport)
+                } else {
+                    timeout(timing.request, provider.read_schedule_preview())
+                        .await
+                        .unwrap_or(Err(ProviderError::Transport))
+                };
+                self.finish_schedule(reply, result);
+            }
+            ScheduleJob::Save(request, reply) => {
+                let result = if reply.is_closed() {
+                    Err(ProviderError::Transport)
+                } else {
+                    timeout(Duration::from_secs(360), provider.save_schedule(request))
+                        .await
+                        .unwrap_or(Err(ProviderError::Transport))
+                };
+                self.finish_schedule(reply, result);
+            }
+            ScheduleJob::Trial(action, reply) => {
+                let result = if reply.is_closed() {
+                    Err(ProviderError::Transport)
+                } else {
+                    timeout(Duration::from_secs(90), provider.schedule_trial(action))
+                        .await
+                        .unwrap_or(Err(ProviderError::Transport))
+                };
+                self.finish_schedule(reply, result);
+            }
+        }
     }
     pub fn snapshot(&self) -> Snapshot {
         self.core.lock().unwrap().state.clone()
@@ -172,8 +263,8 @@ impl Controller {
         }
         core.pending_logout = true;
         core.pending_login = None;
-        if let Some(reply) = core.pending_schedule.take() {
-            let _ = reply.send(Err(ProviderError::LoginRequired));
+        if let Some(job) = core.pending_schedule.take() {
+            job.reject();
         }
         core.schedule_loading = false;
         core.pending = None;
