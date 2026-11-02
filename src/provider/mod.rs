@@ -1,5 +1,6 @@
 pub mod ocstat;
 pub mod ocstat_schedule;
+mod ocstat_schedule_tcp;
 pub mod simulator;
 
 use crate::domain::{DeviceState, TargetTemperature};
@@ -34,6 +35,9 @@ pub trait Provider: Send + Sync {
     }
     /// Called only by the controller worker. Credentials must never be logged.
     fn login(&self, _email: String, _password: String) -> ProviderFuture<'_, DeviceState> {
+        Box::pin(async { Err(ProviderError::ReadOnly) })
+    }
+    fn read_schedule(&self) -> ProviderFuture<'_, crate::schedule::Schedule> {
         Box::pin(async { Err(ProviderError::ReadOnly) })
     }
     fn read(&self) -> ProviderFuture<'_, DeviceState>;

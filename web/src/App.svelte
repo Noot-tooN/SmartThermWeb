@@ -156,6 +156,7 @@
     {:else}
       <Thermostat {dashboard} />
       {#key dashboard.state.session}<Schedule
+          live={dashboard.state.provider === 'ocstat'}
           onExpired={() => dashboard.sessionExpired()}
         />{/key}
       {#if dashboard.state?.provider === 'simulator'}

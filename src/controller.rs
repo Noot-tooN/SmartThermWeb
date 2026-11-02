@@ -8,9 +8,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::{Notify, broadcast},
+    sync::{Notify, broadcast, oneshot},
     time::{Instant, sleep, timeout},
 };
+
+type ScheduleReply = oneshot::Sender<Result<crate::schedule::Schedule, ProviderError>>;
 
 struct Core {
     state: Snapshot,
@@ -20,6 +22,8 @@ struct Core {
     clients: HashMap<String, u64>,
     pending_login: Option<(String, String)>,
     pending_logout: bool,
+    pending_schedule: Option<ScheduleReply>,
+    schedule_loading: bool,
     next_login: Instant,
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -99,11 +103,54 @@ impl Controller {
                 clients: HashMap::new(),
                 pending_login: None,
                 pending_logout: false,
+                pending_schedule: None,
+                schedule_loading: false,
                 next_login: Instant::now(),
             })),
             events,
             wake: Arc::new(Notify::new()),
         }
+    }
+    pub async fn read_schedule(&self) -> Result<crate::schedule::Schedule, ProviderError> {
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut core = self.core.lock().unwrap();
+            if core.state.login != Some(LoginState::Ready) || core.pending_logout {
+                return Err(ProviderError::LoginRequired);
+            }
+            if core.schedule_loading {
+                return Err(ProviderError::Transport);
+            }
+            core.schedule_loading = true;
+            core.pending_schedule = Some(sender);
+        }
+        self.wake.notify_one();
+        receiver.await.unwrap_or(Err(ProviderError::LoginRequired))
+    }
+    fn take_schedule(&self) -> Option<ScheduleReply> {
+        self.core.lock().unwrap().pending_schedule.take()
+    }
+    async fn execute_schedule(
+        &self,
+        provider: &dyn Provider,
+        reply: ScheduleReply,
+        timing: Timing,
+    ) {
+        let result = if reply.is_closed() {
+            Err(ProviderError::Transport)
+        } else {
+            timeout(timing.request, provider.read_schedule())
+                .await
+                .unwrap_or(Err(ProviderError::Transport))
+        };
+        let mut core = self.core.lock().unwrap();
+        core.schedule_loading = false;
+        let result = if core.pending_logout || core.state.login != Some(LoginState::Ready) {
+            Err(ProviderError::LoginRequired)
+        } else {
+            result
+        };
+        let _ = reply.send(result);
     }
     pub fn snapshot(&self) -> Snapshot {
         self.core.lock().unwrap().state.clone()
@@ -125,6 +172,10 @@ impl Controller {
         }
         core.pending_logout = true;
         core.pending_login = None;
+        if let Some(reply) = core.pending_schedule.take() {
+            let _ = reply.send(Err(ProviderError::LoginRequired));
+        }
+        core.schedule_loading = false;
         core.pending = None;
         core.state.login = Some(LoginState::SigningOut);
         core.state.can_set_target = false;
@@ -430,6 +481,9 @@ impl Controller {
                     .await;
             } else if let Some(command) = self.take_pending() {
                 self.execute(provider.as_ref(), command, timing).await;
+            } else if let Some(reply) = self.take_schedule() {
+                self.execute_schedule(provider.as_ref(), reply, timing)
+                    .await;
             } else {
                 tokio::select! {
                     _ = self.wake.notified() => {},
@@ -440,7 +494,7 @@ impl Controller {
     }
     fn observation_should_yield(&self) -> bool {
         let core = self.core.lock().unwrap();
-        core.pending_logout || core.pending.is_some()
+        core.pending_logout || core.pending.is_some() || core.pending_schedule.is_some()
     }
     async fn execute(&self, provider: &dyn Provider, command: Command, timing: Timing) {
         let id = command.id;
@@ -569,6 +623,83 @@ mod tests {
             room_temperature: Temperature(208),
             mode: Mode::Manual,
         }
+    }
+    struct ScheduleAccount {
+        started: Notify,
+        release: Notify,
+    }
+    impl Provider for ScheduleAccount {
+        fn read(&self) -> crate::provider::ProviderFuture<'_, DeviceState> {
+            Box::pin(async { Ok(observation(1, None, 215)) })
+        }
+        fn read_schedule(&self) -> crate::provider::ProviderFuture<'_, crate::schedule::Schedule> {
+            Box::pin(async {
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(crate::schedule::Schedule {
+                    pattern: crate::schedule::Pattern::Daily,
+                    groups: vec![crate::schedule::DayGroup {
+                        group: crate::schedule::Group::EveryDay,
+                        changes: vec![crate::schedule::Change {
+                            start_minute: 0,
+                            target_temperature: target(185),
+                        }],
+                    }],
+                })
+            })
+        }
+        fn send_target(
+            &self,
+            _: u64,
+            _: TargetTemperature,
+        ) -> crate::provider::ProviderFuture<'_, ()> {
+            Box::pin(async { panic!("schedule read must not write") })
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn schedule_reads_are_bounded_and_logout_rejects_late_results() {
+        let c = Controller::ocstat();
+        c.core.lock().unwrap().state.login = Some(LoginState::Ready);
+        let provider = Arc::new(ScheduleAccount {
+            started: Notify::new(),
+            release: Notify::new(),
+        });
+        let worker = tokio::spawn(c.clone().run(
+            provider.clone(),
+            Timing {
+                request: Duration::from_secs(20),
+                poll: Duration::from_secs(30),
+                confirmation: Duration::from_secs(1),
+            },
+        ));
+        let copy = c.clone();
+        let reader = tokio::spawn(async move { copy.read_schedule().await });
+        provider.started.notified().await;
+        assert_eq!(c.read_schedule().await, Err(ProviderError::Transport));
+        c.submit_logout().unwrap();
+        provider.release.notify_one();
+        assert_eq!(reader.await.unwrap(), Err(ProviderError::LoginRequired));
+        worker.abort();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn schedule_read_timeout_releases_the_queue() {
+        let c = Controller::ocstat();
+        c.core.lock().unwrap().state.login = Some(LoginState::Ready);
+        let provider = Arc::new(ScheduleAccount {
+            started: Notify::new(),
+            release: Notify::new(),
+        });
+        let worker = tokio::spawn(c.clone().run(
+            provider.clone(),
+            Timing {
+                request: Duration::from_secs(2),
+                poll: Duration::from_secs(30),
+                confirmation: Duration::from_secs(1),
+            },
+        ));
+        assert_eq!(c.read_schedule().await, Err(ProviderError::Transport));
+        assert!(!c.core.lock().unwrap().schedule_loading);
+        worker.abort();
     }
     struct SlowAccount {
         started: Notify,

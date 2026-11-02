@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/session", get(session_status))
         .route("/api/thermostat", get(snapshot))
         .route("/api/thermostat/target", put(set_target))
+        .route("/api/thermostat/schedule", get(read_schedule))
         .route(
             "/api/thermostat/schedule/preview",
             post(preview_schedule).layer(DefaultBodyLimit::max(16_384)),
@@ -343,6 +344,25 @@ async fn set_target(
         }
     };
     Ok((StatusCode::ACCEPTED, Json(snapshot)))
+}
+async fn read_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let session = browser_session(&state, &headers).ok_or(ApiError::Unauthenticated)?;
+    let schedule = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        session.controller.read_schedule(),
+    )
+    .await
+    .map_err(|_| ApiError::CloudUnavailable)?
+    .map_err(|e| match e {
+        crate::provider::ProviderError::LoginRequired
+        | crate::provider::ProviderError::Authentication => ApiError::Unauthenticated,
+        _ => ApiError::CloudUnavailable,
+    })?;
+    let preview = schedule.preview().map_err(|_| ApiError::CloudUnavailable)?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(preview)))
 }
 // Pure calculation: this route never invokes a provider or persists a schedule.
 async fn preview_schedule(

@@ -90,6 +90,7 @@ it('mounts the complete data screen once and preserves it through stream connect
   const { request, resolve } = pendingSession();
   const { container } = render(App);
   expect(container.querySelector('.thermostat')).toBeNull();
+  request.mockResolvedValue({ ok: false, status: 503 } as Response);
   resolve(response(signedIn));
   const target = await screen.findByLabelText('Desired target temperature');
   expect(target.textContent).toContain('21.5');
@@ -132,7 +133,8 @@ it('mounts the complete data screen once and preserves it through stream connect
   expect(container.querySelector('.thermostat')).toBe(card);
   expect(target.textContent).toContain('21.5');
   finish(response({ ...signedIn, revision: 2 }));
-  await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(3));
+  expect(request.mock.calls[1][0]).toBe('/api/thermostat/schedule');
   expect(container.querySelector('.thermostat')).toBe(card);
   await vi.waitFor(() => expect(refresh.hasAttribute('disabled')).toBe(false));
   request.mockResolvedValue(response({ ...signedIn, revision: 3 }));

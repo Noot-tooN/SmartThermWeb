@@ -5,6 +5,9 @@ SmartTherm 128 APK. This is a backlog, not authorization to send live commands.
 
 ## Schedule (current focus)
 
+See the [schedule transport investigation](schedule-protocol-investigation-2026-11-02.md)
+for HTTPS probe results, captured disabled slots, and the live-save plan.
+
 - [x] Provider-independent Rust schedule model and validated draft preview.
 - [x] 24-hour timeline draft editor: select/paint ranges, drag boundaries, precise
   time controls, adjacent-temperature merging, immediate six-change limit, Undo.
@@ -12,10 +15,10 @@ SmartTherm 128 APK. This is a backlog, not authorization to send live commands.
   and midnight normalization (retaining real changes across day groups).
 - [x] All day/group timelines visible together, per-row hour markers and presets,
   and sticky shared Undo/Discard actions.
-- [ ] Load the actual schedule over HTTPS. The read-only 2026-11-02 probe found
-  `getDeviceListNew` works, but POST `getProgrammeByMode` returns HTTP 404.
-  Type-22 Android instead reads day schedules via its TCP service. Do not add
-  plaintext fallback to the normal app or seed live UI with screenshot values.
+- [x] Load the active server schedule on demand through the owner-authorized
+  plaintext TCP service. HTTP and HTTPS `getProgrammeByMode` both return 404.
+  Login/status/temperature transport remains HTTPS; schedule Save stays disabled.
+- [ ] Replace plaintext schedule reads if a supported encrypted route is found.
 - [ ] Verify schedule write response and mode/day/disabled-slot semantics, then
   enable saving with an explicit controlled trial, conflict protection, and no
   automatic retries after uncertain outcomes.

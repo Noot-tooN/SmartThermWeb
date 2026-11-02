@@ -430,6 +430,26 @@ impl smartthermweb::provider::Provider for FakeAccount {
                 .ok_or(smartthermweb::provider::ProviderError::LoginRequired)
         })
     }
+    fn read_schedule(
+        &self,
+    ) -> smartthermweb::provider::ProviderFuture<'_, smartthermweb::schedule::Schedule> {
+        Box::pin(async {
+            let guard = self.0.lock().unwrap();
+            let state = guard
+                .as_ref()
+                .ok_or(smartthermweb::provider::ProviderError::LoginRequired)?;
+            Ok(smartthermweb::schedule::Schedule {
+                pattern: smartthermweb::schedule::Pattern::Daily,
+                groups: vec![smartthermweb::schedule::DayGroup {
+                    group: smartthermweb::schedule::Group::EveryDay,
+                    changes: vec![smartthermweb::schedule::Change {
+                        start_minute: 0,
+                        target_temperature: state.room_temperature.0.try_into().unwrap(),
+                    }],
+                }],
+            })
+        })
+    }
     fn send_target(
         &self,
         id: u64,
@@ -746,7 +766,7 @@ async fn schedule_preview_validates_without_mutating_thermostat_state() {
         );
     }
     assert_eq!(serde_json::to_value(controller.snapshot()).unwrap(), before);
-    // There is deliberately no schedule write endpoint.
+    // The schedule route is read-only; PUT is deliberately unsupported.
     let response = app
         .oneshot(
             Request::builder()
@@ -757,7 +777,7 @@ async fn schedule_preview_validates_without_mutating_thermostat_state() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 #[tokio::test]
 async fn schedule_preview_requires_signed_in_same_origin_session() {
@@ -786,4 +806,57 @@ async fn schedule_preview_requires_signed_in_same_origin_session() {
             .status(),
         StatusCode::OK
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn schedule_read_is_authenticated_isolated_and_never_writes() {
+    let app = cloud_app();
+    let path = "/api/thermostat/schedule";
+    assert_eq!(
+        app.clone()
+            .oneshot(get_with_cookie(path, ""))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let one = sign_in(&app, "one@example.test").await;
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    let two = sign_in(&app, "second@example.test").await;
+    let before = json(
+        app.clone()
+            .oneshot(get_with_cookie("/api/thermostat", &one))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let a = app
+        .clone()
+        .oneshot(get_with_cookie(path, &one))
+        .await
+        .unwrap();
+    assert_eq!(a.status(), StatusCode::OK);
+    assert_eq!(a.headers()["cache-control"], "no-store");
+    let a = json(a).await;
+    let b = json(
+        app.clone()
+            .oneshot(get_with_cookie(path, &two))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(a["can_save"], false);
+    assert_ne!(
+        a["schedule"]["groups"][0]["changes"][0]["target_temperature"],
+        b["schedule"]["groups"][0]["changes"][0]["target_temperature"]
+    );
+    let after = json(
+        app.clone()
+            .oneshot(get_with_cookie("/api/thermostat", &one))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(before["desired"], after["desired"]);
+    assert_eq!(before["command"], after["command"]);
 }

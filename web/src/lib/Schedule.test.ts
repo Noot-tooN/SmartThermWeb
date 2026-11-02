@@ -24,9 +24,7 @@ function mockFetch() {
 }
 async function open() {
   render(Schedule);
-  await fireEvent.click(
-    screen.getByRole('button', { name: 'Schedule Draft only' }),
-  );
+  await vi.advanceTimersByTimeAsync(0);
 }
 async function customRange(group?: string) {
   const scope = group
@@ -43,13 +41,14 @@ async function paintRange(group?: string) {
     screen.getByRole('button', { name: 'Set 21.5°C for this range' }),
   );
 }
-it('starts collapsed without network traffic and identifies a new draft', async () => {
+it('always shows the schedule without network traffic in draft mode', async () => {
   const fetch = mockFetch();
   render(Schedule);
-  expect(screen.queryByRole('radio', { name: 'Every day' })).toBeNull();
-  await fireEvent.click(
-    screen.getByRole('button', { name: 'Schedule Draft only' }),
-  );
+  expect(screen.getByRole('radio', { name: 'Every day' })).toBeTruthy();
+  expect(
+    screen.queryByRole('button', { name: 'Schedule Draft only' }),
+  ).toBeNull();
+  await vi.advanceTimersByTimeAsync(0);
   expect(
     screen.getByText(
       'Try a new schedule. Nothing here changes your thermostat.',
@@ -149,9 +148,7 @@ it('expires a rejected browser session', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 401 }));
   const expired = vi.fn();
   render(Schedule, { onExpired: expired });
-  await fireEvent.click(
-    screen.getByRole('button', { name: 'Schedule Draft only' }),
-  );
+  await vi.advanceTimersByTimeAsync(0);
   await paintRange();
   await vi.advanceTimersByTimeAsync(300);
   expect(expired).toHaveBeenCalledOnce();
@@ -495,4 +492,232 @@ it('edits an inactive row boundary without changing the other rows', async () =>
   expect(
     weekdays.getByRole('button', { name: '07:00 to 22:00, 21.5 degrees' }),
   ).toBeTruthy();
+});
+
+function loadedPreview() {
+  const changes = [
+    { start_minute: 420, target_temperature: 215 },
+    { start_minute: 1410, target_temperature: 185 },
+  ];
+  return {
+    can_save: false,
+    schedule: {
+      pattern: 'weekday_weekend',
+      groups: ['weekdays', 'weekends'].map((group) => ({ group, changes })),
+    },
+    days: [
+      'monday',
+      'tuesday',
+      'wednesday',
+      'thursday',
+      'friday',
+      'saturday',
+      'sunday',
+    ].map((day) => ({
+      day,
+      periods: [
+        {
+          start_minute: 0,
+          end_minute: 420,
+          target_temperature: 185,
+          continues_from_previous_day: true,
+        },
+        {
+          start_minute: 420,
+          end_minute: 1410,
+          target_temperature: 215,
+          continues_from_previous_day: false,
+        },
+        {
+          start_minute: 1410,
+          end_minute: 1440,
+          target_temperature: 185,
+          continues_from_previous_day: false,
+        },
+      ],
+    })),
+  };
+}
+it('loads real periods on mount and discards back to the loaded baseline', async () => {
+  const fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => loadedPreview(),
+  });
+  vi.stubGlobal('fetch', fetch);
+  render(Schedule, { live: true });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetch.mock.calls[0][0]).toBe('/api/thermostat/schedule');
+  expect(
+    screen.getAllByRole('button', { name: '07:00 to 23:30, 21.5 degrees' }),
+  ).toHaveLength(2);
+  expect(
+    screen.queryByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+  ).toBeNull();
+  const row = within(screen.getByRole('region', { name: 'Weekdays schedule' }));
+  await fireEvent.click(
+    row.getByRole('button', { name: '07:00 to 23:30, 21.5 degrees' }),
+  );
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Increase period temperature' }),
+  );
+  expect(
+    (
+      screen.getByRole('button', {
+        name: 'Reload schedule',
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Discard changes' }),
+  );
+  expect(
+    screen.getAllByRole('button', { name: '07:00 to 23:30, 21.5 degrees' }),
+  ).toHaveLength(2);
+  expect(
+    (
+      screen.getByRole('button', {
+        name: 'Reload schedule',
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(false);
+  expect(
+    (screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+});
+it('never presents sample periods after a failed live load and allows retry', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce({ ok: false, status: 503 })
+    .mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => loadedPreview(),
+    });
+  vi.stubGlobal('fetch', fetch);
+  render(Schedule, { live: true });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByRole('alert').textContent).toContain('Could not load');
+  expect(
+    screen.queryByRole('region', { name: 'Every day schedule' }),
+  ).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Retry load' }));
+  expect(
+    screen.getAllByRole('button', { name: '07:00 to 23:30, 21.5 degrees' }),
+  ).toHaveLength(2);
+});
+it('expires the browser session when schedule access is rejected', async () => {
+  const expired = vi.fn();
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401 }));
+  render(Schedule, { live: true, onExpired: expired });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(expired).toHaveBeenCalledOnce();
+  expect(
+    screen.queryByRole('region', { name: 'Every day schedule' }),
+  ).toBeNull();
+});
+it('blocks reload across pattern changes until all draft edits are discarded', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => loadedPreview(),
+    }),
+  );
+  render(Schedule, { live: true });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(
+    screen
+      .getByRole('radio', { name: 'Weekdays / weekends' })
+      .closest('label')
+      ?.querySelector('.mode-marker.is-current'),
+  ).toBeTruthy();
+  expect(document.querySelectorAll('.mode-marker.is-current')).toHaveLength(1);
+  await fireEvent.click(screen.getByRole('radio', { name: 'Each day' }));
+  expect(
+    screen
+      .getByRole('radio', { name: 'Weekdays / weekends' })
+      .closest('label')
+      ?.querySelector('.mode-marker.is-current'),
+  ).toBeTruthy();
+  expect(document.querySelectorAll('.mode-marker.is-current')).toHaveLength(1);
+  expect(
+    (
+      screen.getByRole('button', {
+        name: 'Reload schedule',
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Discard changes' }),
+  );
+  expect(
+    screen.getByRole('region', { name: 'Weekdays schedule' }),
+  ).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Monday schedule' })).toBeNull();
+  expect(
+    screen
+      .getByRole('button', { name: 'Reload schedule' })
+      .closest('.schedule-heading'),
+  ).toBeTruthy();
+});
+
+it('shows changeover times without hovering and updates them after moving a boundary', async () => {
+  mockFetch();
+  await open();
+  await paintRange();
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Close period editor' }),
+  );
+  const times = () =>
+    [...document.querySelectorAll('.changeover-time')].map(
+      (node) => node.textContent,
+    );
+  expect(times()).toEqual(['07:00', '22:00']);
+  await fireEvent.keyDown(screen.getByRole('slider', { name: 'Boundary 1' }), {
+    key: 'ArrowRight',
+  });
+  expect(times()).toEqual(['07:30', '22:00']);
+  await fireEvent.click(screen.getByRole('button', { name: /Undo/ }));
+  expect(times()).toEqual(['07:00', '22:00']);
+});
+
+it('reserves a skeleton immediately, then keeps loaded timelines in place during reload', async () => {
+  let resolve!: (response: unknown) => void;
+  const fetch = vi.fn().mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  vi.stubGlobal('fetch', fetch);
+  const { container } = render(Schedule, { live: true });
+  expect(container.querySelectorAll('.skeleton .timeline')).toHaveLength(2);
+  expect(
+    container.querySelector('.schedule-panel')?.getAttribute('aria-busy'),
+  ).toBe('true');
+  expect(screen.getByRole('status').textContent).toContain('Loading schedule');
+  expect(screen.queryByRole('radio', { name: 'Every day' })).toBeNull();
+  resolve({ ok: true, status: 200, json: async () => loadedPreview() });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(container.querySelector('.skeleton')).toBeNull();
+  const timeline = screen.getByRole('region', { name: 'Weekdays schedule' });
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Reload schedule' }),
+  );
+  expect(screen.getByRole('region', { name: 'Weekdays schedule' })).toBe(
+    timeline,
+  );
+  expect(container.querySelector('.skeleton')).toBeNull();
+  expect(screen.getByRole('status').classList.contains('sr-only')).toBe(true);
+  resolve({ ok: true, status: 200, json: async () => loadedPreview() });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByRole('region', { name: 'Weekdays schedule' })).toBe(
+    timeline,
+  );
+  expect(
+    container.querySelector('.schedule-panel')?.getAttribute('aria-busy'),
+  ).toBe('false');
 });

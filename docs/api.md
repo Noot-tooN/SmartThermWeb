@@ -108,3 +108,25 @@ The manufacturer adapter separately maps to APK programme mode/day codes and
 active `[minute, temperature]` arrays. This is not a complete send-ready payload:
 disabled-slot padding/preservation and successful response semantics still need
 verification. No manufacturer codes, tokens, or device identifiers reach the UI.
+
+## Schedule loading
+
+`GET /api/thermostat/schedule` requires a signed-in browser session and returns
+the same clean `schedule`, seven-day `days`, and `can_save: false` shape as the
+preview endpoint. It is no-store and never exposes tokens, device IDs, disabled
+raw slots, or wire frames. Missing/expired auth is 401; unreadable or incomplete
+upstream data is 502. PUT is unsupported (405).
+
+Unlike ordinary snapshot GET, this is an explicit on-demand upstream read queued
+through the controller worker. At most one schedule read may be queued/running
+per browser session; duplicate requests fail rather than building a queue.
+A canceled queued request is skipped, timeout releases the queue, and logout
+invalidates pending/late results. Target writes retain priority.
+
+Following the owner's explicit plaintext approval, the OCSTAT adapter uses TCP
+8800 for schedule reads. Authentication and control/status remain HTTPS. The TCP
+exchange has an eight-second deadline, bounded input, no automatic reconnect,
+a fresh client ID, and only registration/read selectors. It checks frame length,
+device identity, mode, six slots per group, disabled-slot encoding, time/target
+ranges and complete groups. HTTPS status reads before/after must agree on mode
+and remain online. This is a server observation, not physical acknowledgement.

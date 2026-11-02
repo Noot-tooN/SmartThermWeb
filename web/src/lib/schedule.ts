@@ -48,6 +48,42 @@ export interface Preview {
     }[];
   }[];
 }
+/** Anchor actual overnight temperatures before the user edits any timeline. */
+export function draftFromPreview(preview: Preview): Schedule {
+  const pattern = preview.schedule.pattern;
+  return {
+    pattern,
+    groups: preview.schedule.groups.map(({ group }) => {
+      const covered =
+        group === 'every_day'
+          ? days
+          : group === 'weekdays'
+            ? days.slice(0, 5)
+            : group === 'weekends'
+              ? days.slice(5)
+              : [group];
+      const plans = covered.map((day) => {
+        const periods = preview.days.find((d) => d.day === day)?.periods;
+        if (
+          !periods?.length ||
+          periods[0].start_minute !== 0 ||
+          periods.at(-1)!.end_minute !== 1440
+        )
+          throw new Error('The server returned an incomplete schedule.');
+        return periods.map((p) => ({
+          start_minute: p.start_minute,
+          target_temperature: p.target_temperature,
+        }));
+      });
+      if (plans.some((p) => JSON.stringify(p) !== JSON.stringify(plans[0]))) {
+        throw new Error(
+          'This grouped schedule has different overnight temperatures on different days. Editing it is not supported yet.',
+        );
+      }
+      return { group, changes: plans[0] };
+    }),
+  };
+}
 export function clock(minute: number): string {
   return `${Math.floor(minute / 60)
     .toString()

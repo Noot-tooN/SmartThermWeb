@@ -1,3 +1,4 @@
+import { draftFromPreview, type Preview } from './schedule';
 import { expect, it } from 'vitest';
 import {
   moveBoundary,
@@ -97,4 +98,68 @@ it('retains midnight where weekday and weekend carry-over differs', () => {
   s.groups[0].changes = paint(periods(base), 420, 1320, 215);
   s.groups[1].changes = [{ start_minute: 0, target_temperature: 200 }];
   expect(normalizeSchedule(s).groups[0].changes[0]).toEqual(base[0]);
+});
+
+it('keeps actual overnight carry-over when loading an individual-day schedule', () => {
+  const preview = {
+    schedule: {
+      pattern: 'weekly',
+      groups: [
+        {
+          group: 'monday',
+          changes: [{ start_minute: 420, target_temperature: 215 }],
+        },
+      ],
+    },
+    can_save: false,
+    days: [
+      {
+        day: 'monday',
+        periods: [
+          {
+            start_minute: 0,
+            end_minute: 420,
+            target_temperature: 175,
+            continues_from_previous_day: true,
+          },
+          {
+            start_minute: 420,
+            end_minute: 1440,
+            target_temperature: 215,
+            continues_from_previous_day: false,
+          },
+        ],
+      },
+    ],
+  } as Preview;
+  expect(draftFromPreview(preview).groups[0].changes).toEqual([
+    { start_minute: 0, target_temperature: 175 },
+    { start_minute: 420, target_temperature: 215 },
+  ]);
+});
+it('refuses to flatten different overnight periods into a misleading grouped bar', () => {
+  const preview = {
+    schedule: {
+      pattern: 'weekday_weekend',
+      groups: [
+        {
+          group: 'weekends',
+          changes: [{ start_minute: 420, target_temperature: 215 }],
+        },
+      ],
+    },
+    can_save: false,
+    days: ['saturday', 'sunday'].map((day, i) => ({
+      day,
+      periods: [
+        {
+          start_minute: 0,
+          end_minute: 1440,
+          target_temperature: i ? 215 : 175,
+          continues_from_previous_day: false,
+        },
+      ],
+    })),
+  } as Preview;
+  expect(() => draftFromPreview(preview)).toThrow('different overnight');
 });

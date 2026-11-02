@@ -380,6 +380,39 @@ impl Ocstat {
         auth.revision += 1;
         Ok(observed)
     }
+    async fn read_schedule_plaintext(&self) -> Result<crate::schedule::Schedule, ProviderError> {
+        let mut auth = self.auth.lock().await;
+        let before = self.read_locked(&mut auth).await?;
+        if !before.online {
+            return Err(ProviderError::Offline);
+        }
+        let mode: u8 = auth
+            .context
+            .as_ref()
+            .ok_or(ProviderError::InvalidResponse)?
+            .program_mode
+            .parse()
+            .map_err(|_| ProviderError::InvalidResponse)?;
+        let session = auth.session.as_ref().ok_or(ProviderError::LoginRequired)?;
+        let device = auth
+            .device_id
+            .clone()
+            .ok_or(ProviderError::DeviceNotFound)?;
+        let tcp_result =
+            super::ocstat_schedule_tcp::read(session.id, &session.token, &device, mode).await;
+        let schedule = tcp_result?;
+        let after = self.read_locked(&mut auth).await?;
+        if !after.online
+            || auth.device_id.as_deref() != Some(device.as_str())
+            || auth
+                .context
+                .as_ref()
+                .is_none_or(|c| c.program_mode != mode.to_string())
+        {
+            return Err(ProviderError::InvalidResponse);
+        }
+        Ok(schedule)
+    }
     async fn send_target_https(
         &self,
         id: u64,
@@ -503,6 +536,9 @@ impl Provider for Ocstat {
             self.auth.lock().await.session = Some(session);
             self.read_device().await
         })
+    }
+    fn read_schedule(&self) -> ProviderFuture<'_, crate::schedule::Schedule> {
+        Box::pin(self.read_schedule_plaintext())
     }
     fn read(&self) -> ProviderFuture<'_, DeviceState> {
         Box::pin(self.read_device())

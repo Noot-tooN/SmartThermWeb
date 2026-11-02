@@ -67,7 +67,7 @@ SMARTTHERM_PROVIDER=simulator SMARTTHERM_SIM_CONFIG='{"scenario":"reply_lost","a
 
 The Vite development proxy expects backend port 3000. Simulator controls can change behavior at runtime. Reply delay is limited to 30,000 ms; application delay to 60,000 ms. Both delays start at dispatch. Scenario settings affect future commands; offline status also affects reads immediately. There is no automatic resend after a failure. Last confirmed readings remain visible while offline.
 
-The executable enforces a loopback bind. OCSTAT readings require a browser session; the development simulator is unauthenticated. Remote hosting and HTTPS termination are not supported by this local build. The Android capture used plaintext HTTP, but HTTPS login, listing, and status reads were separately verified. This backend requires HTTPS with certificate verification and blocks redirects; it never falls back to HTTP.
+The executable enforces a loopback bind. OCSTAT readings require a browser session; the development simulator is unauthenticated. Remote hosting and HTTPS termination are not supported by this local build. The Android capture used plaintext HTTP, but HTTPS login, listing, and status reads were separately verified. Login, device status and temperature writes require verified HTTPS and block redirects. Schedule reads use the owner-authorized plaintext TCP service on port 8800; they expose the OCSTAT session token on that connection. There is no HTTP fallback for the other operations.
 
 ## OCSTAT temperature control
 
@@ -83,7 +83,7 @@ The single-device UI discovers exactly one returned thermostat and pins it for s
 
 After explicit login, the worker polls every 30 seconds after each read completes. Each HTTPS request has a 10-second timeout; the controller allows 35 seconds for login plus listing and status. Explicit authentication rejection returns to the login form. Browser login attempts are limited globally to one per 10 seconds, with one in progress at a time and at most 32 sessions. Failed login requests are never retried in the background; ordinary read transport failures preserve the last reading and retry with the existing token.
 
-After sign-in, temperature controls are enabled when the thermostat is online, `program_mode=1`, and list/status agree on Auto (`0`) or temporary override (`1`). Each write rechecks that context and sends `work_mode=1`: adjusting from Auto starts a temporary override, while further adjustments update it, following the inspected Android code. Override expiry is not yet verified. The original physical round trip tested an existing override; the Auto-to-override path is covered by fixture tests but has not had a separate physical trial. Unsupported modes and failed reads disable controls; use the Android app for mode/schedule changes. `PUT /api/thermostat/target` requires the same-origin browser session. No Android client identifier or TCP 8800 connection is used.
+After sign-in, temperature controls are enabled when the thermostat is online, `program_mode=1`, and list/status agree on Auto (`0`) or temporary override (`1`). Each write rechecks that context and sends `work_mode=1`: adjusting from Auto starts a temporary override, while further adjustments update it, following the inspected Android code. Override expiry is not yet verified. The original physical round trip tested an existing override; the Auto-to-override path is covered by fixture tests but has not had a separate physical trial. Unsupported modes and failed reads disable controls; use the Android app for mode/schedule changes. `PUT /api/thermostat/target` requires the same-origin browser session. Temperature controls do not use TCP 8800; schedule loading uses a separate read-only connection with a fresh client identifier.
 
 The app permits 5–35°C in 0.5°C steps, matching the type-22 control screen in the inspected Android APK. This confirms the official client's bounds, not firmware enforcement or physical endpoint testing. Individual targets outside the live-tested 21.5–22.5°C round trip have not all been physically tested. Repeated edits coalesce, failures retain the desired target, and there is no automatic resend.
 
@@ -96,7 +96,7 @@ Each read combines the device list with a validated, device-matched status frame
 - State, command IDs, and latest per-browser revision counters live in memory and reset on restart. A fresh server session ID lets the browser distinguish resets from stale updates. At most 256 browser client IDs are tracked per process; restart the local simulator if that limit is reached.
 - In simulator mode, full snapshots keep the API simple. Only the latest user command and active command are retained, not an audit history. Polling is every 500 ms outside a write request. Writes wait up to 3 seconds for a server reply and then up to 6 seconds for application. Background reconciliation continues after that deadline.
 - Simulator observations include reliable application correlation and monotonic revisions. OCSTAT may not offer either; do not fabricate these guarantees in a future adapter.
-- Live schedule integration, mode changes, shared/remote access control, token persistence, Nix, and deployment infrastructure are deferred.
+- Live schedule writes, mode changes, shared/remote access control, token persistence, Nix, and deployment infrastructure are deferred.
 
 Before enabling real writes, obtain evidence linking reported state to physical device application and verify message IDs and mode/schedule effects. Writes require a separately approved experiment and implementation. Never commit raw captures or credentials.
 
@@ -119,15 +119,15 @@ Verified device feedback can be added through the existing provider contract: `a
 
 ## Schedule work
 
-The collapsible **Schedule** panel is a draft editor, not the device's live
-schedule. Choose a repeating pattern: one row for every day, two rows for weekdays/weekends,
+Opening **Schedule** loads the server-stored active schedule for the signed-in device.
+Edits remain local drafts; Save is disabled. The simulator keeps its sample draft editor. Choose a repeating pattern: one row for every day, two rows for weekdays/weekends,
 or seven rows for individual days. All rows remain visible, each with subtle hour markers inside its timeline.
 The shared draft actions stick to the viewport bottom while scrolling within the editor.
 Select a block or drag a range on any row,
 and set its temperature. Drag boundaries (30-minute snapping), use the arrow-key
 controls, or open the time label for exact 10-minute times. Adjacent equal temperatures merge; edits
 that exceed six changes are rejected without altering the draft. Undo reverses
-each completed edit across rows. Discard changes resets all rows in the current pattern;
+each completed edit across rows. Discard changes restores the loaded schedule and its pattern (or resets the current simulator draft);
 Save schedule remains disabled until live integration is verified. A hover marker shows the snapped time, and pending selections
 have draggable start/end handles before applying. Temperature controls appear in
 a compact popover attached to the bar. Rust validation runs automatically after
@@ -143,8 +143,19 @@ and can be undone in one step. Summer is a constant lower heating target, not Of
 Preset templates are copied into the draft so later edits cannot change the template.
 **Choose custom hours** opens the exact-time editor for keyboard/touch range entry.
 
-The APK's `getProgrammeByMode` endpoint returned HTTP 404 over HTTPS in a read-only
-probe on 2026-11-02; device listing succeeded in the same probe. Type-22 Android
-reads schedules over TCP. Live HTTPS schedule reading and writing remain to be
-established. See [the feature backlog](docs/feature-backlog.md) and
+The APK's `getProgrammeByMode` endpoint returned 404 over both HTTPS and HTTP.
+Following explicit owner approval on 2026-11-02, schedule loading uses a bounded
+plaintext TCP connection, fresh client identifier, and read selectors only. The
+controller serializes it with other provider operations. Identity, mode, six-slot
+structure, time/temperature ranges and complete groups are checked; HTTPS status
+reads bracket the fetch to reject a changed mode or offline device. These checks
+do not prove an atomic snapshot or physical application. Reload is manual and
+disabled while edits exist. Mixed overnight temperatures within a grouped row
+are rejected rather than flattened incorrectly. Live schedule writes remain unverified. See [the feature backlog](docs/feature-backlog.md) and
 [preview API](docs/api.md#schedule-draft-preview).
+
+Schedule stays expanded and loads after sign-in. A reduced-motion-aware skeleton
+reserves the two-row layout during the initial fetch; reloads retain existing
+content. The selector marks the mode last read from the server independently of
+the selected draft. Changeover times share one line, with guide lines when labels
+need spacing. Narrow periods expose exact times and temperatures in their editor.

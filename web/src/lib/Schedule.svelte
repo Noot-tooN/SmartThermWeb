@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { boundaryLabels } from './timelineLabels';
   import {
     clock,
+    draftFromPreview,
     groups,
     labels,
     newDraft,
@@ -18,8 +20,10 @@
     type Period,
     type Schedule,
   } from './schedule';
-  let { onExpired = () => {} }: { onExpired?: () => void } = $props();
-  let expanded = $state(false);
+  let {
+    onExpired = () => {},
+    live = false,
+  }: { onExpired?: () => void; live?: boolean } = $props();
   let pattern = $state<Pattern>('daily');
   let selected = $state<Group>('every_day');
   let drafts = $state<Record<Pattern, Schedule>>({
@@ -27,6 +31,67 @@
     weekday_weekend: newDraft('weekday_weekend'),
     weekly: newDraft('weekly'),
   });
+  const copy = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+  let baselines = $state<Record<Pattern, Schedule>>({
+    daily: newDraft('daily'),
+    weekday_weekend: newDraft('weekday_weekend'),
+    weekly: newDraft('weekly'),
+  });
+  let loaded = $state(false);
+  let loading = $state(false);
+  let loadError = $state('');
+  let loadedPattern = $state<Pattern>('daily');
+  let loadRequest: AbortController | null = null;
+  async function loadSchedule() {
+    if (loading || (loaded && dirty)) return;
+    loading = true;
+    loadError = '';
+    const controller = new AbortController();
+    loadRequest = controller;
+    try {
+      const response = await fetch('/api/thermostat/schedule', {
+        signal: AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(45000),
+        ]),
+      });
+      if (controller.signal.aborted) return;
+      if (response.status === 401) {
+        onExpired();
+        return;
+      }
+      if (!response.ok)
+        throw new Error('Could not load the schedule. Try again.');
+      const preview = await response.json();
+      if (controller.signal.aborted) return;
+      const draft = draftFromPreview(preview);
+      generation++;
+      clearTimeout(timer);
+      request?.abort();
+      validationError = false;
+      error = '';
+      history = [];
+      drafts = {
+        daily: newDraft('daily'),
+        weekday_weekend: newDraft('weekday_weekend'),
+        weekly: newDraft('weekly'),
+      };
+      drafts[draft.pattern] = draft;
+      baselines = copy(drafts);
+      pattern = loadedPattern = draft.pattern;
+      changeGroup(groups[pattern][0]);
+      dismiss();
+      loaded = true;
+    } catch (caught) {
+      if (!controller.signal.aborted)
+        loadError =
+          caught instanceof Error && caught.name === 'Error'
+            ? caught.message
+            : 'Could not load the schedule. Try again.';
+    } finally {
+      if (!controller.signal.aborted) loading = false;
+    }
+  }
   let selection = $state({
     start: 0,
     end: 1440,
@@ -45,14 +110,26 @@
     [],
   );
   const timelines = new Map<Group, HTMLDivElement>();
+  let timelineWidths = $state<Partial<Record<Group, number>>>({});
   let hoverGroup = $state<Group | null>(null);
   const dirty = $derived(
-    JSON.stringify(drafts[pattern]) !== JSON.stringify(newDraft(pattern)),
+    live && loaded
+      ? pattern !== loadedPattern ||
+          JSON.stringify(drafts) !== JSON.stringify(baselines)
+      : JSON.stringify(drafts[pattern]) !== JSON.stringify(baselines[pattern]),
   );
   function registerTimeline(node: HTMLDivElement, group: Group) {
     timelines.set(group, node);
+    const observer =
+      typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(([entry]) => {
+            timelineWidths[group] = entry.contentRect.width;
+          });
+    observer?.observe(node);
     return {
       destroy() {
+        observer?.disconnect();
         timelines.delete(group);
       },
     };
@@ -65,8 +142,14 @@
     skipClick = false;
   }
   function discard() {
-    drafts[pattern] = newDraft(pattern);
-    history = history.filter((entry) => entry.pattern !== pattern);
+    if (live && loaded) {
+      drafts = copy(baselines);
+      pattern = loadedPattern;
+      history = [];
+    } else {
+      drafts[pattern] = copy(baselines[pattern]);
+      history = history.filter((entry) => entry.pattern !== pattern);
+    }
     changeGroup(groups[pattern][0]);
     dismiss();
     presetsOpen = false;
@@ -429,7 +512,11 @@
     hover = null;
     dismiss();
   }
+  onMount(() => {
+    if (live) void loadSchedule();
+  });
   onDestroy(() => {
+    loadRequest?.abort();
     generation++;
     clearTimeout(timer);
     request?.abort();
@@ -437,347 +524,451 @@
 </script>
 
 <svelte:window onpointerdown={outside} onkeydown={escape} />
-<section class="schedule-panel" aria-labelledby="schedule-title">
-  <h2 id="schedule-title">
-    <button
-      class="schedule-toggle"
-      aria-expanded={expanded}
-      aria-controls="schedule-content"
-      onclick={() => {
-        expanded = !expanded;
-        dismiss();
-      }}
-      ><span
-        >Schedule <small
-          title="Drafts are cleared when you leave or refresh. No thermostat settings are changed."
-          >Draft only</small
-        ></span
-      ><span aria-hidden="true">{expanded ? '−' : '+'}</span></button
-    >
-  </h2>
-  <div id="schedule-content" hidden={!expanded}>
-    <p class="availability">
-      Try a new schedule. Nothing here changes your thermostat.
-    </p>
-    <div class="toolbar">
-      <fieldset class="pattern-picker">
-        <legend class="sr-only">Schedule pattern</legend>
-        {#each patternChoices as choice}
-          <label class="pattern-choice"
-            ><input
-              type="radio"
-              name="schedule-pattern"
-              value={choice.value}
-              checked={pattern === choice.value}
-              onchange={() => changePattern(choice.value)}
-            /><span>{choice.label}</span></label
-          >
-        {/each}
-      </fieldset>
-    </div>
-    <div class="schedule-editor">
-      {#each drafts[pattern].groups as row (row.group)}
-        {@const active = selected === row.group}
-        {@const rowBlocks = periods(row.changes)}
-        {@const rowDisplay = active ? display : rowBlocks}
-        <section
-          class="timeline-area"
-          aria-label={`${labels[row.group]} schedule`}
-        >
-          <div class="row-heading">
-            <h3>{labels[row.group]}</h3>
-            <div class="preset-picker">
-              <button
-                class="preset-toggle"
-                aria-expanded={active && presetsOpen}
-                onclick={(event) => {
-                  presetsAbove =
-                    event.currentTarget.getBoundingClientRect().top >
-                    window.innerHeight / 2;
-                  activate(row.group);
-                  dismiss();
-                  presetsOpen = !presetsOpen;
-                  hover = null;
-                }}>Choose a preset <span aria-hidden="true">⌄</span></button
-              >
-              {#if active && presetsOpen}<div
-                  class="preset-menu"
-                  class:above={presetsAbove}
+<section
+  class="schedule-panel"
+  aria-labelledby="schedule-title"
+  aria-busy={live && (loading || (!loaded && !loadError))}
+>
+  <header class="schedule-heading">
+    <h2 id="schedule-title">
+      Schedule <small
+        title="Drafts are cleared when you leave or refresh. No thermostat settings are changed."
+        >Draft only</small
+      >
+    </h2>
+    {#if live}<button
+        class="quiet reload-schedule"
+        disabled={!loaded || loading || dirty}
+        title={dirty
+          ? 'Discard edits before reloading'
+          : 'Reload schedule from server'}
+        onclick={loadSchedule}
+        ><span aria-hidden="true">↻</span> Reload schedule</button
+      >{/if}
+  </header>
+  <div id="schedule-content">
+    {#if !live}<p class="availability">
+        Try a new schedule. Nothing here changes your thermostat.
+      </p>{/if}
+    {#if live && (loading || (!loaded && !loadError))}<p
+        class="sr-only"
+        role="status"
+      >
+        Loading schedule…
+      </p>{/if}
+    {#if live && !loaded}
+      <div class="schedule-placeholder">
+        <div class="skeleton" class:failed={!!loadError} aria-hidden="true">
+          <div class="toolbar">
+            <div class="pattern-picker skeleton-shape">
+              {#each patternChoices as choice}<div class="pattern-choice">
+                  <span class="pattern-option">
+                    {choice.label}<small class="mode-marker">● Active</small>
+                  </span>
+                </div>{/each}
+            </div>
+          </div>
+          <div class="schedule-editor">
+            {#each [0, 1] as row}
+              <div class="timeline-area">
+                <div class="row-heading">
+                  <span class="skeleton-shape skeleton-label"></span>
+                  <span class="skeleton-shape skeleton-preset"></span>
+                </div>
+                <div class="timeline skeleton-shape"></div>
+              </div>
+            {/each}
+            <div class="draft-actions">
+              <div>
+                <button class="quiet skeleton-shape" disabled>↶ Undo</button>
+                <button class="quiet skeleton-shape" disabled
+                  >Discard changes</button
                 >
-                  <div class="preset-heading">
-                    <strong>Suggested schedules</strong><button
-                      class="close"
-                      aria-label="Close suggested schedules"
-                      onclick={() => (presetsOpen = false)}>×</button
+              </div>
+              <div class="save-area">
+                <button class="save skeleton-shape" disabled
+                  >Save schedule</button
+                >
+                <small class="skeleton-shape">Saving isn’t available yet</small>
+              </div>
+            </div>
+          </div>
+        </div>
+        {#if loadError}<div class="load-failure" role="alert">
+            <p>{loadError}</p>
+            <button class="quiet" onclick={loadSchedule}>Retry load</button>
+          </div>{/if}
+      </div>
+    {/if}
+    {#if !live || loaded}
+      <div class="toolbar">
+        <fieldset class="pattern-picker" disabled={loading}>
+          <legend class="sr-only">Schedule pattern</legend>
+          <span id="schedule-current-mode" class="sr-only"
+            >Current schedule mode last read from the server</span
+          >
+          {#each patternChoices as choice}
+            <label class="pattern-choice"
+              ><input
+                type="radio"
+                name="schedule-pattern"
+                value={choice.value}
+                aria-label={choice.label}
+                aria-describedby={live &&
+                loaded &&
+                choice.value === loadedPattern
+                  ? 'schedule-current-mode'
+                  : undefined}
+                checked={pattern === choice.value}
+                onchange={() => changePattern(choice.value)}
+              /><span class="pattern-option"
+                >{choice.label}<small
+                  class="mode-marker"
+                  class:is-current={live &&
+                    loaded &&
+                    choice.value === loadedPattern}
+                  aria-hidden="true">● Active</small
+                ></span
+              ></label
+            >
+          {/each}
+        </fieldset>
+      </div>
+      <div class="schedule-editor" inert={loading}>
+        {#each drafts[pattern].groups as row (row.group)}
+          {@const active = selected === row.group}
+          {@const rowBlocks = periods(row.changes)}
+          {@const rowDisplay = active ? display : rowBlocks}
+          {@const changeovers = boundaryLabels(
+            rowDisplay.slice(1).map((period) => period.start),
+            timelineWidths[row.group] ?? 600,
+          )}
+          <section
+            class="timeline-area"
+            aria-label={`${labels[row.group]} schedule`}
+          >
+            <div class="row-heading">
+              <h3>{labels[row.group]}</h3>
+              <div class="preset-picker">
+                <button
+                  class="preset-toggle"
+                  aria-expanded={active && presetsOpen}
+                  onclick={(event) => {
+                    presetsAbove =
+                      event.currentTarget.getBoundingClientRect().top >
+                      window.innerHeight / 2;
+                    activate(row.group);
+                    dismiss();
+                    presetsOpen = !presetsOpen;
+                    hover = null;
+                  }}>Choose a preset <span aria-hidden="true">⌄</span></button
+                >
+                {#if active && presetsOpen}<div
+                    class="preset-menu"
+                    class:above={presetsAbove}
+                  >
+                    <div class="preset-heading">
+                      <strong>Suggested schedules</strong><button
+                        class="close"
+                        aria-label="Close suggested schedules"
+                        onclick={() => (presetsOpen = false)}>×</button
+                      >
+                    </div>
+                    <p>
+                      Replaces {labels[selected].toLowerCase()} only. You can edit
+                      or undo it.
+                    </p>
+                    <div class="preset-options">
+                      {#each schedulePresets as preset}
+                        <button
+                          class="preset-card"
+                          aria-label={`Use ${preset.name} preset`}
+                          onclick={() => usePreset(preset)}
+                        >
+                          <strong>{preset.name}</strong>
+                          <span class="preset-strip" aria-hidden="true"
+                            >{#each periods(preset.changes) as period}<span
+                                style:flex={period.end - period.start}
+                                style:background={period.temperature >= 210
+                                  ? '#d9a064'
+                                  : '#99b9aa'}
+                              ></span>{/each}</span
+                          >
+                          <span class="preset-description"
+                            >{preset.description}</span
+                          ><small>{preset.detail}</small>
+                        </button>
+                      {/each}
+                    </div>
+                    <button class="custom-hours" onclick={range}
+                      >Choose custom hours…</button
                     >
                   </div>
-                  <p>
-                    Replaces {labels[selected].toLowerCase()} only. You can edit or
-                    undo it.
-                  </p>
-                  <div class="preset-options">
-                    {#each schedulePresets as preset}
-                      <button
-                        class="preset-card"
-                        aria-label={`Use ${preset.name} preset`}
-                        onclick={() => usePreset(preset)}
-                      >
-                        <strong>{preset.name}</strong>
-                        <span class="preset-strip" aria-hidden="true"
-                          >{#each periods(preset.changes) as period}<span
-                              style:flex={period.end - period.start}
-                              style:background={period.temperature >= 210
-                                ? '#d9a064'
-                                : '#99b9aa'}
-                            ></span>{/each}</span
-                        >
-                        <span class="preset-description"
-                          >{preset.description}</span
-                        ><small>{preset.detail}</small>
-                      </button>
-                    {/each}
-                  </div>
-                  <button class="custom-hours" onclick={range}
-                    >Choose custom hours…</button
+                {/if}
+              </div>
+            </div>
+            <!-- Pointer gestures have keyboard equivalents on blocks and slider handles. -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+              class="timeline"
+              style:margin-bottom={changeovers.length ? '30px' : '0px'}
+              use:registerTimeline={row.group}
+              onpointerdown={(event) => {
+                activate(row.group);
+                begin(event, 'range');
+              }}
+              onpointermove={(event) => move(event, row.group)}
+              onpointerup={finish}
+              onpointercancel={cancel}
+              onpointerleave={() => (hover = null)}
+            >
+              {#each rowDisplay as b}<button
+                  class="block"
+                  class:active={active &&
+                    popover &&
+                    !selection.range &&
+                    selection.start === b.start}
+                  class:last-block={b.end === 1440}
+                  style:left={`${b.start / 14.4}%`}
+                  style:width={`${(b.end - b.start) / 14.4}%`}
+                  style:--warm={`${Math.min(75, Math.max(0, (b.temperature - 185) * 2))}%`}
+                  title={`${clock(b.start)}–${clock(b.end)} · ${(b.temperature / 10).toFixed(1)}°C`}
+                  aria-label={`${clock(b.start)} to ${clock(b.end)}, ${(b.temperature / 10).toFixed(1)} degrees`}
+                  aria-pressed={active &&
+                    popover &&
+                    !selection.range &&
+                    selection.start === b.start}
+                  onclick={(event) => {
+                    activate(row.group);
+                    clickBlock(b, event);
+                  }}
+                  ><span class="block-value"
+                    >{(b.temperature / 10).toFixed(1)}<small>°</small></span
+                  ><span class="block-dot" aria-hidden="true">·</span></button
+                >{/each}
+              {#if changeovers.length}<svg
+                  class="changeover-guides"
+                  aria-hidden="true"
+                  width="100%"
+                  height="10"
+                >
+                  {#each changeovers as label}<line
+                      x1={`${label.minute / 14.4}%`}
+                      y1="0"
+                      x2={`${label.position}%`}
+                      y2="10"
+                    />{/each}
+                </svg>{/if}
+              {#each changeovers as label}<span
+                  class="changeover-time"
+                  aria-hidden="true"
+                  style:left={`${label.position}%`}>{clock(label.minute)}</span
+                >{/each}
+              <div class="timeline-scale" aria-hidden="true">
+                {#each [6, 12, 18] as hour}<span
+                    style:left={`${(hour / 24) * 100}%`}
+                    >{hour.toString().padStart(2, '0')}</span
+                  >{/each}
+              </div>
+              {#if active && drawnRange}
+                <div
+                  class="range-overlay"
+                  style:left={`${drawnRange.start / 14.4}%`}
+                  style:width={`${(drawnRange.end - drawnRange.start) / 14.4}%`}
+                ></div>
+              {/if}
+              {#if active && drag?.kind === 'range'}
+                {@const start = Math.min(
+                  drag.anchor,
+                  drag.moved ? drag.minute : drag.anchor,
+                )}
+                {@const end = Math.max(
+                  drag.anchor,
+                  drag.moved ? drag.minute : drag.anchor,
+                )}
+                <span
+                  class="drag-range-time"
+                  role="status"
+                  aria-label="Drawing range"
+                  style:left={`clamp(64px, ${(start + end) / 2 / 14.4}%, calc(100% - 64px))`}
+                  >{clock(start)}–{clock(end)}</span
+                >
+              {/if}
+              {#if active && selection.range && drawnRange && drag?.kind !== 'range'}
+                {#each ['start', 'end'] as edge}
+                  {@const e = edge as 'start' | 'end'}
+                  <button
+                    class="boundary selection-handle"
+                    role="slider"
+                    aria-label={`Selection ${edge}`}
+                    aria-valuemin={e === 'start' ? 0 : selection.start + 10}
+                    aria-valuemax={e === 'start' ? selection.end - 10 : 1440}
+                    aria-valuenow={drawnRange[e]}
+                    aria-valuetext={clock(drawnRange[e])}
+                    style:left={`${drawnRange[e] / 14.4}%`}
+                    onpointerdown={(event) =>
+                      begin(
+                        event,
+                        e === 'start' ? 'selection-start' : 'selection-end',
+                      )}
+                    onpointermove={(event) => move(event, row.group)}
+                    onpointerup={finish}
+                    onpointercancel={cancel}
+                    onkeydown={(event) => selectionKey(event, e)}
+                    onclick={(event) => event.stopPropagation()}
+                    ><span aria-hidden="true"></span><strong
+                      class="boundary-time">{clock(drawnRange[e])}</strong
+                    ></button
                   >
+                {/each}
+              {:else}
+                {#each rowDisplay.slice(1) as b, i}<button
+                    class="boundary"
+                    role="slider"
+                    aria-label={`Boundary ${i + 1}`}
+                    aria-valuemin={rowBlocks[i].start + 10}
+                    aria-valuemax={rowBlocks[i + 1].end - 10}
+                    aria-valuenow={b.start}
+                    aria-valuetext={clock(b.start)}
+                    style:left={`${b.start / 14.4}%`}
+                    onpointerdown={(event) => {
+                      activate(row.group);
+                      begin(event, 'boundary', i + 1);
+                    }}
+                    onpointermove={(event) => move(event, row.group)}
+                    onpointerup={finish}
+                    onpointercancel={cancel}
+                    onkeydown={(event) => {
+                      activate(row.group);
+                      boundaryKey(event, i + 1);
+                    }}
+                    onclick={(event) => event.stopPropagation()}
+                    ><span aria-hidden="true"
+                    ></span>{#if active && drag?.kind === 'boundary' && drag.index === i + 1 && drag.moved}<strong
+                        class="boundary-time">{clock(b.start)}</strong
+                      >{/if}</button
+                  >{/each}
+              {/if}
+              {#if hoverGroup === row.group && hover !== null && !drag}<div
+                  class="hover-guide"
+                  style:left={`${hover / 14.4}%`}
+                  aria-hidden="true"
+                ></div>
+                <span
+                  class="hover-time"
+                  style:left={`clamp(24px, ${hover / 14.4}%, calc(100% - 24px))`}
+                  aria-hidden="true">{clock(hover)}</span
+                >{/if}
+              {#if active && popover && !drag?.moved}
+                <!-- Contextual controls stay attached to the bar; no permanent form below it. -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div
+                  class="period-popover"
+                  role="group"
+                  aria-label={selection.range
+                    ? 'Edit selected range'
+                    : 'Edit selected period'}
+                  style:left={`clamp(146px, ${anchor}%, calc(100% - 146px))`}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onpointermove={(event) => event.stopPropagation()}
+                >
+                  <div class="popover-heading">
+                    <button
+                      class="time-summary"
+                      aria-expanded={precise}
+                      aria-controls="precise-times"
+                      title="Edit exact times"
+                      onclick={() => (precise = !precise)}
+                      >{clock(selection.start)}–{clock(selection.end)}
+                      <span aria-hidden="true">⌄</span></button
+                    ><button
+                      class="close"
+                      aria-label={selection.range
+                        ? 'Cancel range'
+                        : 'Close period editor'}
+                      onclick={dismiss}>×</button
+                    >
+                  </div>
+                  <div class="temperature-controls">
+                    <button
+                      aria-label="Decrease period temperature"
+                      disabled={selection.temperature <= 50}
+                      onclick={() => adjustTemperature(-5)}>−</button
+                    ><output aria-label="Period temperature"
+                      >{(selection.temperature / 10).toFixed(1)}<small>°C</small
+                      ></output
+                    ><button
+                      aria-label="Increase period temperature"
+                      disabled={selection.temperature >= 350}
+                      onclick={() => adjustTemperature(5)}>+</button
+                    >
+                  </div>
+                  {#if precise}<div class="precise-times" id="precise-times">
+                      {#each ['start', 'end'] as edge}{@const e = edge as
+                          'start' | 'end'}{@const fixed =
+                          !selection.range &&
+                          (e === 'start'
+                            ? selection.start === 0
+                            : selection.end === 1440)}<label
+                          >{e === 'start' ? 'From' : 'Until'}<select
+                            aria-label={`Period ${edge}`}
+                            value={selection[e]}
+                            disabled={fixed}
+                            onchange={(event) => {
+                              adjustTime(e, Number(event.currentTarget.value));
+                              precise = true;
+                            }}
+                            >{#each times as minute}<option
+                                value={minute}
+                                disabled={e === 'start'
+                                  ? minute >= selection.end
+                                  : minute <= selection.start}
+                                >{clock(minute)}</option
+                              >{/each}</select
+                          ></label
+                        >{/each}
+                    </div>{/if}
+                  {#if selection.range}<button
+                      class="apply-range"
+                      aria-label={`Set ${(selection.temperature / 10).toFixed(1)}°C for this range`}
+                      onclick={() => apply()}>Apply to range</button
+                    >{/if}
                 </div>
               {/if}
             </div>
+          </section>
+        {/each}
+        <div class="draft-actions">
+          <div>
+            <button class="quiet" disabled={!history.length} onclick={undo}
+              >↶ Undo</button
+            >
+            <button class="quiet" disabled={!dirty} onclick={discard}
+              >Discard changes</button
+            >
           </div>
-          <!-- Pointer gestures have keyboard equivalents on blocks and slider handles. -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
-            class="timeline"
-            use:registerTimeline={row.group}
-            onpointerdown={(event) => {
-              activate(row.group);
-              begin(event, 'range');
-            }}
-            onpointermove={(event) => move(event, row.group)}
-            onpointerup={finish}
-            onpointercancel={cancel}
-            onpointerleave={() => (hover = null)}
-          >
-            {#each rowDisplay as b}<button
-                class="block"
-                class:active={active &&
-                  popover &&
-                  !selection.range &&
-                  selection.start === b.start}
-                class:last-block={b.end === 1440}
-                style:left={`${b.start / 14.4}%`}
-                style:width={`${(b.end - b.start) / 14.4}%`}
-                style:--warm={`${Math.min(75, Math.max(0, (b.temperature - 185) * 2))}%`}
-                aria-label={`${clock(b.start)} to ${clock(b.end)}, ${(b.temperature / 10).toFixed(1)} degrees`}
-                aria-pressed={active &&
-                  popover &&
-                  !selection.range &&
-                  selection.start === b.start}
-                onclick={(event) => {
-                  activate(row.group);
-                  clickBlock(b, event);
-                }}
-                ><span class="block-value"
-                  >{(b.temperature / 10).toFixed(1)}<small>°</small></span
-                ><span class="block-dot" aria-hidden="true">·</span></button
-              >{/each}
-            <div class="timeline-scale" aria-hidden="true">
-              {#each [6, 12, 18] as hour}<span
-                  style:left={`${(hour / 24) * 100}%`}
-                  >{hour.toString().padStart(2, '0')}</span
-                >{/each}
-            </div>
-            {#if active && drawnRange}
-              <div
-                class="range-overlay"
-                style:left={`${drawnRange.start / 14.4}%`}
-                style:width={`${(drawnRange.end - drawnRange.start) / 14.4}%`}
-              ></div>
-            {/if}
-            {#if active && drag?.kind === 'range'}
-              {@const start = Math.min(
-                drag.anchor,
-                drag.moved ? drag.minute : drag.anchor,
-              )}
-              {@const end = Math.max(
-                drag.anchor,
-                drag.moved ? drag.minute : drag.anchor,
-              )}
-              <span
-                class="drag-range-time"
-                role="status"
-                aria-label="Drawing range"
-                style:left={`clamp(64px, ${(start + end) / 2 / 14.4}%, calc(100% - 64px))`}
-                >{clock(start)}–{clock(end)}</span
-              >
-            {/if}
-            {#if active && selection.range && drawnRange && drag?.kind !== 'range'}
-              {#each ['start', 'end'] as edge}
-                {@const e = edge as 'start' | 'end'}
-                <button
-                  class="boundary selection-handle"
-                  role="slider"
-                  aria-label={`Selection ${edge}`}
-                  aria-valuemin={e === 'start' ? 0 : selection.start + 10}
-                  aria-valuemax={e === 'start' ? selection.end - 10 : 1440}
-                  aria-valuenow={drawnRange[e]}
-                  aria-valuetext={clock(drawnRange[e])}
-                  style:left={`${drawnRange[e] / 14.4}%`}
-                  onpointerdown={(event) =>
-                    begin(
-                      event,
-                      e === 'start' ? 'selection-start' : 'selection-end',
-                    )}
-                  onpointermove={(event) => move(event, row.group)}
-                  onpointerup={finish}
-                  onpointercancel={cancel}
-                  onkeydown={(event) => selectionKey(event, e)}
-                  onclick={(event) => event.stopPropagation()}
-                  ><span aria-hidden="true"></span><strong class="boundary-time"
-                    >{clock(drawnRange[e])}</strong
-                  ></button
-                >
-              {/each}
-            {:else}
-              {#each rowDisplay.slice(1) as b, i}<button
-                  class="boundary"
-                  role="slider"
-                  aria-label={`Boundary ${i + 1}`}
-                  aria-valuemin={rowBlocks[i].start + 10}
-                  aria-valuemax={rowBlocks[i + 1].end - 10}
-                  aria-valuenow={b.start}
-                  aria-valuetext={clock(b.start)}
-                  style:left={`${b.start / 14.4}%`}
-                  onpointerdown={(event) => {
-                    activate(row.group);
-                    begin(event, 'boundary', i + 1);
-                  }}
-                  onpointermove={(event) => move(event, row.group)}
-                  onpointerup={finish}
-                  onpointercancel={cancel}
-                  onkeydown={(event) => {
-                    activate(row.group);
-                    boundaryKey(event, i + 1);
-                  }}
-                  onclick={(event) => event.stopPropagation()}
-                  ><span aria-hidden="true"
-                  ></span>{#if active && drag?.kind === 'boundary' && drag.index === i + 1 && drag.moved}<strong
-                      class="boundary-time">{clock(b.start)}</strong
-                    >{/if}</button
-                >{/each}
-            {/if}
-            {#if hoverGroup === row.group && hover !== null && !drag}<div
-                class="hover-guide"
-                style:left={`${hover / 14.4}%`}
-                aria-hidden="true"
-              ></div>
-              <span
-                class="hover-time"
-                style:left={`clamp(24px, ${hover / 14.4}%, calc(100% - 24px))`}
-                aria-hidden="true">{clock(hover)}</span
-              >{/if}
-            {#if active && popover && !drag?.moved}
-              <!-- Contextual controls stay attached to the bar; no permanent form below it. -->
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div
-                class="period-popover"
-                role="group"
-                aria-label={selection.range
-                  ? 'Edit selected range'
-                  : 'Edit selected period'}
-                style:left={`clamp(146px, ${anchor}%, calc(100% - 146px))`}
-                onpointerdown={(event) => event.stopPropagation()}
-                onpointermove={(event) => event.stopPropagation()}
-              >
-                <div class="popover-heading">
-                  <button
-                    class="time-summary"
-                    aria-expanded={precise}
-                    aria-controls="precise-times"
-                    title="Edit exact times"
-                    onclick={() => (precise = !precise)}
-                    >{clock(selection.start)}–{clock(selection.end)}
-                    <span aria-hidden="true">⌄</span></button
-                  ><button
-                    class="close"
-                    aria-label={selection.range
-                      ? 'Cancel range'
-                      : 'Close period editor'}
-                    onclick={dismiss}>×</button
-                  >
-                </div>
-                <div class="temperature-controls">
-                  <button
-                    aria-label="Decrease period temperature"
-                    disabled={selection.temperature <= 50}
-                    onclick={() => adjustTemperature(-5)}>−</button
-                  ><output aria-label="Period temperature"
-                    >{(selection.temperature / 10).toFixed(1)}<small>°C</small
-                    ></output
-                  ><button
-                    aria-label="Increase period temperature"
-                    disabled={selection.temperature >= 350}
-                    onclick={() => adjustTemperature(5)}>+</button
-                  >
-                </div>
-                {#if precise}<div class="precise-times" id="precise-times">
-                    {#each ['start', 'end'] as edge}{@const e = edge as
-                        'start' | 'end'}{@const fixed =
-                        !selection.range &&
-                        (e === 'start'
-                          ? selection.start === 0
-                          : selection.end === 1440)}<label
-                        >{e === 'start' ? 'From' : 'Until'}<select
-                          aria-label={`Period ${edge}`}
-                          value={selection[e]}
-                          disabled={fixed}
-                          onchange={(event) => {
-                            adjustTime(e, Number(event.currentTarget.value));
-                            precise = true;
-                          }}
-                          >{#each times as minute}<option
-                              value={minute}
-                              disabled={e === 'start'
-                                ? minute >= selection.end
-                                : minute <= selection.start}
-                              >{clock(minute)}</option
-                            >{/each}</select
-                        ></label
-                      >{/each}
-                  </div>{/if}
-                {#if selection.range}<button
-                    class="apply-range"
-                    aria-label={`Set ${(selection.temperature / 10).toFixed(1)}°C for this range`}
-                    onclick={() => apply()}>Apply to range</button
-                  >{/if}
-              </div>
-            {/if}
+          <div class="save-area">
+            <button class="save" disabled aria-describedby="schedule-save-note"
+              >Save schedule</button
+            >
+            <small id="schedule-save-note">Saving isn’t available yet</small>
           </div>
-        </section>
-      {/each}
-      <div class="draft-actions">
-        <div>
-          <button class="quiet" disabled={!history.length} onclick={undo}
-            >↶ Undo</button
-          >
-          <button class="quiet" disabled={!dirty} onclick={discard}
-            >Discard changes</button
-          >
-        </div>
-        <div class="save-area">
-          <button class="save" disabled aria-describedby="schedule-save-note"
-            >Save schedule</button
-          >
-          <small id="schedule-save-note">Saving isn’t available yet</small>
         </div>
       </div>
-    </div>
-    {#if error}<p class="error" role="alert">{error}</p>{/if}
-    {#if validationError}<p class="error" role="alert">
-        {validation}<button class="quiet" onclick={checkDraft}
-          >Retry check</button
-        >
-      </p>{/if}
+      {#if loadError}<p class="error" role="alert">
+          {loadError}<button
+            class="quiet"
+            disabled={loading || dirty}
+            onclick={loadSchedule}>Retry load</button
+          >
+        </p>{/if}
+      {#if error}<p class="error" role="alert">{error}</p>{/if}
+      {#if validationError}<p class="error" role="alert">
+          {validation}<button class="quiet" onclick={checkDraft}
+            >Retry check</button
+          >
+        </p>{/if}
+    {/if}
   </div>
 </section>
 
@@ -794,21 +985,43 @@
     font-size: 16px;
     font-weight: 500;
   }
-  .schedule-toggle {
+  .schedule-heading {
     padding: 22px 30px;
-    width: 100%;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    border: 0;
-    background: none;
-    color: var(--ink);
-    text-align: left;
+    flex-wrap: wrap;
+    gap: 8px 16px;
   }
-  .schedule-toggle > span:first-child {
+  .schedule-heading h2 {
     display: flex;
     align-items: center;
     gap: 14px;
+  }
+  .reload-schedule {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .changeover-guides {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    pointer-events: none;
+    stroke: var(--muted);
+    stroke-opacity: 0.45;
+    stroke-width: 1;
+  }
+  .changeover-time {
+    position: absolute;
+    top: calc(100% + 12px);
+    transform: translateX(-50%);
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 14px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    pointer-events: none;
   }
   small {
     font-size: 11px;
@@ -817,6 +1030,82 @@
   }
   #schedule-content {
     padding: 0 30px 18px;
+  }
+  .schedule-placeholder {
+    position: relative;
+  }
+  .skeleton.failed {
+    visibility: hidden;
+  }
+  .skeleton .pattern-option {
+    color: transparent;
+  }
+  .skeleton .row-heading {
+    height: 44px;
+  }
+  .skeleton .timeline {
+    margin-bottom: 30px;
+  }
+  .skeleton-label {
+    width: 70px;
+    height: 12px;
+  }
+  .skeleton-preset {
+    width: 120px;
+    height: 12px;
+  }
+  .skeleton .quiet,
+  .skeleton .save,
+  .skeleton .save-area small {
+    color: transparent;
+  }
+  .skeleton-shape {
+    position: relative;
+    overflow: hidden;
+    border-radius: 8px;
+    background: var(--soft);
+  }
+  .skeleton-shape::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in srgb, var(--accent) 12%, transparent),
+      transparent
+    );
+    animation: schedule-shimmer 1.8s ease-in-out infinite;
+  }
+  .failed .skeleton-shape::after {
+    animation: none;
+  }
+  .load-failure {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+  }
+  .load-failure p {
+    margin: 0;
+  }
+  @keyframes schedule-shimmer {
+    to {
+      transform: translateX(100%);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .skeleton-shape::after {
+      animation: none;
+      display: none;
+    }
   }
   .availability {
     font-size: 12px;
@@ -869,7 +1158,9 @@
     cursor: pointer;
     min-width: 0;
   }
-  .pattern-choice span {
+  .pattern-option {
+    flex-direction: column;
+    gap: 3px;
     width: 100%;
     display: flex;
     align-items: center;
@@ -882,6 +1173,15 @@
     min-height: 44px;
     color: var(--muted);
     border: 1px solid transparent;
+  }
+  .mode-marker {
+    visibility: hidden;
+    font-size: 9px;
+    line-height: 11px;
+    color: var(--accent);
+  }
+  .mode-marker.is-current {
+    visibility: visible;
   }
   .pattern-choice input:checked + span {
     background: var(--surface);
@@ -1120,12 +1420,22 @@
   .block-dot {
     display: none;
   }
-  @container (max-width:50px) {
-    .block-value {
+  .block-value {
+    white-space: nowrap;
+  }
+  @container (max-width:76px) {
+    .block-value,
+    .block-value small {
       font-size: 12px;
     }
   }
-  @container (max-width:35px) {
+  @container (max-width:52px) {
+    .block-value,
+    .block-value small {
+      font-size: 10px;
+    }
+  }
+  @container (max-width:40px) {
     .block-value {
       display: none;
     }
@@ -1310,7 +1620,7 @@
     .pattern-picker {
       flex-basis: 100%;
     }
-    .pattern-choice span {
+    .pattern-option {
       padding: 8px 5px;
       font-size: 11px;
     }
@@ -1331,7 +1641,7 @@
       height: 5px;
     }
 
-    .schedule-toggle {
+    .schedule-heading {
       padding: 20px;
     }
     #schedule-content {
