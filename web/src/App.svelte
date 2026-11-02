@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { Dashboard } from './lib/dashboard.svelte';
   import Thermostat from './lib/Thermostat.svelte';
+  import Schedule from './lib/Schedule.svelte';
   import Login from './lib/Login.svelte';
   import AccountActions from './lib/AccountActions.svelte';
   import AccountHeader from './lib/AccountHeader.svelte';
@@ -154,6 +155,9 @@
       <Login {dashboard} />
     {:else}
       <Thermostat {dashboard} />
+      {#key dashboard.state.session}<Schedule
+          onExpired={() => dashboard.sessionExpired()}
+        />{/key}
       {#if dashboard.state?.provider === 'simulator'}
         <details class="simulator-panel">
           <summary

@@ -96,7 +96,7 @@ Each read combines the device list with a validated, device-matched status frame
 - State, command IDs, and latest per-browser revision counters live in memory and reset on restart. A fresh server session ID lets the browser distinguish resets from stale updates. At most 256 browser client IDs are tracked per process; restart the local simulator if that limit is reached.
 - In simulator mode, full snapshots keep the API simple. Only the latest user command and active command are retained, not an audit history. Polling is every 500 ms outside a write request. Writes wait up to 3 seconds for a server reply and then up to 6 seconds for application. Background reconciliation continues after that deadline.
 - Simulator observations include reliable application correlation and monotonic revisions. OCSTAT may not offer either; do not fabricate these guarantees in a future adapter.
-- Schedules, mode changes, shared/remote access control, token persistence, Nix, and deployment infrastructure are deferred.
+- Live schedule integration, mode changes, shared/remote access control, token persistence, Nix, and deployment infrastructure are deferred.
 
 Before enabling real writes, obtain evidence linking reported state to physical device application and verify message IDs and mode/schedule effects. Writes require a separately approved experiment and implementation. Never commit raw captures or credentials.
 
@@ -116,3 +116,35 @@ The server checkmark means **Accepted by server**, never physical application. O
 The temporary sync recorder was removed and capture investigation paused on 2026-11-02. Historical findings remain in `docs/`; captures and APK files stay outside Git.
 
 Verified device feedback can be added through the existing provider contract: `applied_command` carries device-origin evidence correlated to a local command, while `matched_command` means only cloud-value agreement. The controller validates application evidence before emitting `confirmed`; the frontend's `deviceApplicationVerified` projection drives the separate thermostat indicator. The simulator exercises this path today. OCSTAT must leave `applied_command` empty until a reliable protocol is established.
+
+## Schedule work
+
+The collapsible **Schedule** panel is a draft editor, not the device's live
+schedule. Choose a repeating pattern: one row for every day, two rows for weekdays/weekends,
+or seven rows for individual days. All rows remain visible, each with subtle hour markers inside its timeline.
+The shared draft actions stick to the viewport bottom while scrolling within the editor.
+Select a block or drag a range on any row,
+and set its temperature. Drag boundaries (30-minute snapping), use the arrow-key
+controls, or open the time label for exact 10-minute times. Adjacent equal temperatures merge; edits
+that exceed six changes are rejected without altering the draft. Undo reverses
+each completed edit across rows. Discard changes resets all rows in the current pattern;
+Save schedule remains disabled until live integration is verified. A hover marker shows the snapped time, and pending selections
+have draggable start/end handles before applying. Temperature controls appear in
+a compact popover attached to the bar. Rust validation runs automatically after
+edits; redundant midnight anchors do not consume a change.
+Rust validates the draft and computes overnight periods. Drafts remain in page
+memory while switching patterns; leaving, refreshing, or signing out clears them.
+No schedule save request exists and previewing never changes the thermostat.
+
+Pattern selection uses a keyboard-accessible segmented control. **Choose a preset**
+shows Winter day, Morning & evening, and Summer examples with their exact hours and
+temperatures before selection. Applying one replaces only the selected day/group
+and can be undone in one step. Summer is a constant lower heating target, not Off.
+Preset templates are copied into the draft so later edits cannot change the template.
+**Choose custom hours** opens the exact-time editor for keyboard/touch range entry.
+
+The APK's `getProgrammeByMode` endpoint returned HTTP 404 over HTTPS in a read-only
+probe on 2026-11-02; device listing succeeded in the same probe. Type-22 Android
+reads schedules over TCP. Live HTTPS schedule reading and writing remain to be
+established. See [the feature backlog](docs/feature-backlog.md) and
+[preview API](docs/api.md#schedule-draft-preview).

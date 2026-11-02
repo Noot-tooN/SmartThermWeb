@@ -82,3 +82,29 @@ The process-wide `/api/health` response uses the anonymous controller, so its OC
 ### Auto and temporary override
 
 OCSTAT reports `mode.kind: schedule` for matching work/status mode `0`, or `temporary_override` for matching mode `1`, with `program_mode=1`. Other or disagreeing contexts remain `unknown` and cannot write. Labels describe cloud observations. An online target change in either supported mode sends `work_mode=1`, following Android's Auto-to-temporary-override behavior. The local target API is unchanged; the provider decides from a fresh preflight, never a client-supplied mode. Scheduled readings do not count as a matching temporary-override command. No device application evidence is created.
+
+## Schedule draft preview
+
+`POST /api/thermostat/schedule/preview` validates and expands a draft; it does
+not call a provider, persist a draft, or change any thermostat state. Real mode
+requires a signed-in browser session and same origin. Responses use `no-store`.
+
+```json
+{"pattern":"daily","groups":[{"group":"every_day","changes":[{"start_minute":420,"target_temperature":215},{"start_minute":1410,"target_temperature":185}]}]}
+```
+
+Patterns: `daily` (`every_day`); `weekday_weekend` (`weekdays`, `weekends`);
+`weekly` (`monday` through `sunday`). Each group requires 1–6 unique changes after midnight normalization,
+in 10-minute increments within a day. Temperatures use integer tenths, 50–350
+in steps of 5. Rust sorts and validates groups/changes and returns `schedule`,
+seven `days` with contiguous `periods` covering 00:00–24:00, and `can_save: false`.
+Periods before the first change inherit the preceding actual day's last target.
+A redundant 00:00 anchor is removed only if it matches the last temperature of
+every preceding day that feeds that group. A seven-row editor draft is accepted
+only when that reduces to six actual changes. Real midnight changes are retained.
+No timezone/current-time assumptions are made. There is no schedule write route.
+
+The manufacturer adapter separately maps to APK programme mode/day codes and
+active `[minute, temperature]` arrays. This is not a complete send-ready payload:
+disabled-slot padding/preservation and successful response semantics still need
+verification. No manufacturer codes, tokens, or device identifiers reach the UI.

@@ -1,4 +1,5 @@
 pub mod ocstat;
+pub mod ocstat_schedule;
 pub mod simulator;
 
 use crate::domain::{DeviceState, TargetTemperature};

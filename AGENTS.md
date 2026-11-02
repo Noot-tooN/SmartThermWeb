@@ -11,6 +11,6 @@ Single Rust crate (Axum/Tokio) and Svelte 5 runes frontend in web/.
 - No real thermostat commands, commits, or pushes without explicit user instruction.
 - `make setup`, `make test`, `make check`, `make build`; `make dev` runs both development servers.
 - Use deterministic Tokio/Vitest clocks for lifecycle tests. Test uncertain outcomes and late reconciliation.
-- Keep dependencies small. No schedules, database, auth system, Nix, or extra infrastructure in this milestone.
+- Keep dependencies small. Schedules are now in scope: keep the browser model independent of OCSTAT encoding; gate live schedule writes until verified and explicitly approved. No database, new auth system, Nix, or extra infrastructure.
 - Preserve the Apache 2.0 license.
 - CodeGraph is not initialized here. Ask before creating an index; use native tools until then.

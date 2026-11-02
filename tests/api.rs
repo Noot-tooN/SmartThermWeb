@@ -701,3 +701,89 @@ async fn authenticated_target_writes_require_same_origin_and_stay_in_their_brows
     assert_eq!(other["desired"], 215);
     assert!(other["command"].is_null());
 }
+
+fn schedule_request(body: &str, cookie: &str, origin: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/api/thermostat/schedule/preview")
+        .header("content-type", "application/json")
+        .header("host", "localhost:3000")
+        .header("origin", origin)
+        .header("cookie", cookie)
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+const DRAFT: &str = r#"{"pattern":"daily","groups":[{"group":"every_day","changes":[{"start_minute":420,"target_temperature":215},{"start_minute":1410,"target_temperature":185}]}]}"#;
+#[tokio::test]
+async fn schedule_preview_validates_without_mutating_thermostat_state() {
+    let (app, controller) = app();
+    let before = serde_json::to_value(controller.snapshot()).unwrap();
+    let response = app
+        .clone()
+        .oneshot(schedule_request(DRAFT, "", "http://localhost:3000"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body = json(response).await;
+    assert_eq!(body["can_save"], false);
+    assert_eq!(body["days"].as_array().unwrap().len(), 7);
+    assert_eq!(body["days"][0]["periods"][0]["target_temperature"], 185);
+    for body in [
+        DRAFT.replace("420", "421"),
+        DRAFT.replace("215", "355"),
+        DRAFT.replace("215", "214"),
+        DRAFT.replace("every_day", "monday"),
+        "{}".into(),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(schedule_request(&body, "", "http://localhost:3000"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(serde_json::to_value(controller.snapshot()).unwrap(), before);
+    // There is deliberately no schedule write endpoint.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/thermostat/schedule")
+                .body(Body::from(DRAFT))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+#[tokio::test]
+async fn schedule_preview_requires_signed_in_same_origin_session() {
+    let app = cloud_app();
+    assert_eq!(
+        app.clone()
+            .oneshot(schedule_request(DRAFT, "", "http://localhost:3000"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let cookie = sign_in(&app, "one@example.test").await;
+    assert_eq!(
+        app.clone()
+            .oneshot(schedule_request(DRAFT, &cookie, "https://other.example"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.oneshot(schedule_request(DRAFT, &cookie, "http://localhost:3000"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}

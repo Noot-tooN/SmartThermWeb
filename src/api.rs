@@ -41,6 +41,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/session", get(session_status))
         .route("/api/thermostat", get(snapshot))
         .route("/api/thermostat/target", put(set_target))
+        .route(
+            "/api/thermostat/schedule/preview",
+            post(preview_schedule).layer(DefaultBodyLimit::max(16_384)),
+        )
         .route("/api/events", get(events))
         .route("/api/health", get(health))
         .route(
@@ -339,6 +343,31 @@ async fn set_target(
         }
     };
     Ok((StatusCode::ACCEPTED, Json(snapshot)))
+}
+// Pure calculation: this route never invokes a provider or persists a schedule.
+async fn preview_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<crate::schedule::Schedule>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    if state.sessions.is_some() {
+        if !local_same_origin(&headers) {
+            return Err(ApiError::InvalidOrigin);
+        }
+        let session = browser_session(&state, &headers).ok_or(ApiError::Unauthenticated)?;
+        if session.controller.snapshot().login != Some(LoginState::Ready) {
+            return Err(ApiError::Unauthenticated);
+        }
+    }
+    let Json(schedule) = body.map_err(|_| {
+        ApiError::Invalid(
+            "Provide a valid schedule with temperatures from 5–35°C in 0.5°C steps.".into(),
+        )
+    })?;
+    let preview = schedule
+        .preview()
+        .map_err(|e| ApiError::Invalid(e.into()))?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(preview)))
 }
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let snapshot = state.controller.snapshot();
