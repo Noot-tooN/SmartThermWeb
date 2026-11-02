@@ -1,6 +1,12 @@
 # OCSTAT / uniTEC SQ10net RF protocol evidence
 
-## Evidence available for this iteration
+## Current implementation
+
+The owner-approved [HTTPS write round trip](capture-write-analysis-2026-11-01.md) succeeded in both directions, and the owner physically confirmed both temperatures. The owner then explicitly authorized enabling app controls. The adapter uses the verified six-field write form without an Android client identifier. Writes require an authenticated same-origin session and a fresh online preflight in Auto or temporary-override context (see the 2026-11-02 extension below). There is no HTTP fallback or TCP transport.
+
+Requested/reported targets remain separate. Two consecutive matching reads yield `target_matched`, not an invented device-origin acknowledgement; `applied_command` remains null. Mode changes, schedules, override expiry, and full manufacturer range remain unverified. The historical sections below describe earlier investigation stages; README/API documentation describe current operation.
+
+## Initial capture evidence
 
 The project brief and one private PCAPdroid capture have now been inspected. See [the sanitized capture analysis](capture-analysis-2026-11-01.md) for the timeline, schemas, and limitations. The capture spans 20.336 seconds and includes two successful plaintext HTTP logins, earlier list/status requests, and client TCP 8800 messages. The offline analysis was followed by an explicitly authorized HTTPS login and read-only device-list test, recorded below. No thermostat write requests have been made by this project.
 
@@ -51,15 +57,9 @@ Next: collect longer session/status evidence using [the capture analysis](captur
 
 ## Adapter boundary
 
-`src/provider/ocstat.rs` now implements the explicitly authorized HTTPS login and read-only device-list integration. Its production transport has a fixed HTTPS origin, only two endpoint variants (`login`, `getDeviceListNew`), certificate verification, disabled redirects, 10-second request timeouts, and a 1 MiB response cap. Raw upstream responses and credential-like extra fields are not exposed or logged.
+The fixed HTTPS origin permits login, list, status, and the verified target-write endpoint. Certificate validation, disabled redirects, timeouts, response-size limits, and sanitized errors remain in place. Browser sessions hold only the token/account/device after login; no automatic password login or secret-file loading exists.
 
-The backend now supports browser-initiated login/logout only. Every server start is signed out, regardless of old credential files or environment settings. The worker uses submitted email/password for a single HTTPS exchange, then retains only the token and selected device in memory. Polling uses that token every 30 seconds; no automatic login or password retry exists. Explicit authentication rejection returns to the login form. No expiry or refresh flow is invented.
-
-The dated verification records below describe earlier implementation stages; file-provisioning behavior recorded there has since been removed.
-
-The executable accepts `SMARTTHERM_PROVIDER=ocstat` in **read-only** mode. API/controller submissions fail closed; `send_target` always returns `ReadOnly` without network access. The UI disables controls and hides command progress. No write endpoint or TCP 8800 integration exists. Local API access remains restricted to loopback.
-
-Readings come from the verified list endpoint, not the undecoded `getDeviceStatus` frame. The `confirmed` snapshot field is retained for API compatibility but represents a cloud observation in OCSTAT mode, not physical device confirmation. Revisions order local reads only; `applied_command` is always null. `last_sync` records the successful cloud read time, not the age of the physical measurement.
+Writes preserve the verified raw work mode after preflight and use fresh message IDs with no automatic retries. The app's range is a policy limit rather than a manufacturer-capability assertion. Controller reconciliation distinguishes `target_matched` from simulator/device-correlated `confirmed`. Read freshness remains limited to cloud observations.
 
 ## Remaining evidence before further protocol implementation
 
@@ -106,3 +106,12 @@ The release binary was started twice, once with the old credential-file environm
 ## Per-browser session revision
 
 The login form still uses only existing OCSTAT email/password; no local account system exists. A successful HTTPS login/read now issues an opaque HttpOnly browser session cookie, with isolated provider/controller state per session. Logout invalidates that cookie session and stops its worker without affecting other browser sessions. Session expiry is a local 12-hour policy, not an assertion about OCSTAT token expiry. File loading and automatic sign-in remain removed; temperature writes remain disabled.
+
+
+## Auto-mode extension — 2026-11-02
+
+Two authorized read-only HTTPS requests at 09:09 UTC returned online status, target 215, room 221, work mode `0`, program mode `1`, and status-frame mode `0`. The earlier physically verified round trips had work/status mode `1`, program mode `1`. Heating flag changed from `1` to `0`, and `disOnOff` from `13` to `03`; neither is an application acknowledgment.
+
+The inspected type-22 Android `ControlAddFragment.updateTemp` explicitly changes work mode `0` to `1` before `modifyTemperature` sends the target. Its display treats `0` as scheduled Auto and `1` as temporary mode. The adapter now follows that action for an online, matching `0/0` or `1/1` context with program mode `1`, using the existing six-field HTTPS write. Both read endpoints are checked again before every write; disagreement, unsupported modes, and failed reads remain fail-closed. Display modes are mapped only for those agreeing contexts.
+
+Fixture tests cover the Auto-to-override form, existing-override writes, changes between observation and preflight, and rejection of schedule-only value matches as override completion. No real write was made for this extension; a separate physical Auto-to-override trial remains unperformed. No claim is made about override expiry or physical synchronization.

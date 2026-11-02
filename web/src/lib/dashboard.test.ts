@@ -61,7 +61,7 @@ describe('optimistic command flow', () => {
       .mockResolvedValue(response(snapshot(2)));
     const { dashboard } = setup(request);
     await dashboard.refresh();
-    expect(dashboard.error).toContain('Cannot reach');
+    expect(dashboard.error).toContain('Cannot load readings');
     await dashboard.refresh();
     expect(dashboard.error).toBe('');
   });
@@ -148,9 +148,9 @@ describe('optimistic command flow', () => {
   });
   it('clamps controls to the supported range and cancels debounce on disposal', async () => {
     const { dashboard, request } = setup();
-    dashboard.accept({ ...snapshot(2), desired: 300 });
+    dashboard.accept({ ...snapshot(2), desired: 350 });
     dashboard.change(5);
-    expect(dashboard.target).toBe(300);
+    expect(dashboard.target).toBe(350);
     dashboard.dispose();
     await vi.advanceTimersByTimeAsync(1000);
     expect(request).not.toHaveBeenCalled();
@@ -247,4 +247,65 @@ it('ignores a refresh response from before login or logout', async () => {
   await next;
   expect(dashboard.state?.login).toBe('required');
   expect(dashboard.state?.confirmed).toBeNull();
+});
+
+it('ends debounce at 350ms even when an older request still blocks the latest one', async () => {
+  const request = vi.fn<typeof fetch>().mockReturnValue(new Promise(() => {}));
+  const { dashboard } = setup(request);
+  dashboard.change(5);
+  expect(dashboard.debouncing).toBe(true);
+  await vi.advanceTimersByTimeAsync(350);
+  expect(dashboard.debouncing).toBe(false);
+  expect(dashboard.submitting).toBe(true);
+  dashboard.change(5);
+  expect(dashboard.debouncing).toBe(true);
+  await vi.advanceTimersByTimeAsync(350);
+  expect(dashboard.debouncing).toBe(false);
+  expect(dashboard.localPending).toBe(true);
+  expect(request).toHaveBeenCalledTimes(1);
+  dashboard.change(5);
+  dashboard.useSession({
+    ...snapshot(),
+    provider: 'ocstat',
+    can_set_target: false,
+    login: 'required',
+  });
+  expect(dashboard.debouncing).toBe(false);
+  await vi.advanceTimersByTimeAsync(350);
+  expect(request).toHaveBeenCalledTimes(1);
+});
+
+it('retains cloud acknowledgement evidence only for the current command and server session', () => {
+  const { dashboard } = setup();
+  const command = {
+    id: 1,
+    target: 230,
+    phase: 'awaiting_device' as const,
+    message: 'Accepted',
+  };
+  dashboard.accept({ ...snapshot(2), command });
+  expect(dashboard.cloudAcknowledged).toBe(true);
+  dashboard.accept({
+    ...snapshot(3),
+    command: { ...command, phase: 'confirmed' },
+  });
+  expect(dashboard.cloudAcknowledged).toBe(true);
+  dashboard.accept({
+    ...snapshot(4),
+    command: { ...command, id: 2, phase: 'confirmed' },
+  });
+  expect(dashboard.cloudAcknowledged).toBe(false);
+  dashboard.accept({ ...snapshot(2), command });
+  expect(dashboard.cloudAcknowledged).toBe(false);
+  dashboard.accept({ ...snapshot(5), command: { ...command, id: 2 } });
+  expect(dashboard.cloudAcknowledged).toBe(true);
+  dashboard.accept(
+    {
+      ...snapshot(1),
+      session: 'new-server',
+      command: { ...command, id: 2, phase: 'confirmed' },
+    },
+    'stream',
+  );
+  expect(dashboard.cloudAcknowledged).toBe(false);
 });

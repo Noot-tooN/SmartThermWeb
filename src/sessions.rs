@@ -113,7 +113,7 @@ impl Sessions {
             inner.next_login = Instant::now() + Duration::from_secs(10);
         }
         let provider = (self.factory)().map_err(SessionError::Login)?;
-        let controller = Controller::ocstat_read_only();
+        let controller = Controller::ocstat();
         let mut events = controller.subscribe();
         controller
             .submit_login(email, password)
@@ -124,7 +124,7 @@ impl Sessions {
         let done = revoked.clone();
         let worker = tokio::spawn(async move {
             tokio::select! {
-                _ = worker_controller.run(provider, Timing { request: Duration::from_secs(25), poll: Duration::from_secs(30), ..Timing::default() }) => {},
+                _ = worker_controller.run(provider, Timing { request: Duration::from_secs(35), poll: Duration::from_secs(30), confirmation: Duration::from_secs(30) }) => {},
                 _ = sleep_until(expires) => {},
                 _ = cancel.changed() => {},
             }
@@ -137,7 +137,7 @@ impl Sessions {
             revoked,
             worker,
         });
-        let snapshot = timeout(Duration::from_secs(26), async {
+        let snapshot = timeout(Duration::from_secs(36), async {
             loop {
                 let state = events.recv().await.map_err(|_| SessionError::Unavailable)?;
                 match state.login {

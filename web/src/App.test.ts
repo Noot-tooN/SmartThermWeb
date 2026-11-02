@@ -23,6 +23,7 @@ const signedIn: Snapshot = {
   session: 'signed-in',
   revision: 1,
   login: 'ready',
+  can_set_target: true,
   connectivity: 'online',
   last_sync: 123,
   confirmed: {
@@ -59,6 +60,10 @@ function pendingSession() {
 beforeEach(() => {
   FakeEventSource.instances = [];
   vi.stubGlobal('EventSource', FakeEventSource);
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn(() => Object.assign(new EventTarget(), { matches: false })),
+  );
 });
 afterEach(() => {
   cleanup();
@@ -71,12 +76,12 @@ it('never mounts the thermostat or refresh button before the signed-out session 
   expect(screen.getByRole('status').textContent).toContain('Loading');
   expect(container.querySelector('.thermostat')).toBeNull();
   expect(container.querySelector('footer')).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Refresh readings' })).toBeNull();
   expect(screen.queryByText('CONNECTING')).toBeNull();
   expect(FakeEventSource.instances).toHaveLength(0);
   resolve(response(signedOut));
   await screen.findByRole('heading', { name: 'Sign in to OCSTAT' });
-  expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Refresh readings' })).toBeNull();
   expect(screen.queryByLabelText('Desired target temperature')).toBeNull();
   expect(FakeEventSource.instances).toHaveLength(0);
 });
@@ -88,14 +93,29 @@ it('mounts the complete data screen once and preserves it through stream connect
   resolve(response(signedIn));
   const target = await screen.findByLabelText('Desired target temperature');
   expect(target.textContent).toContain('21.5');
+  expect(screen.queryByText('OCSTAT')).toBeNull();
+  expect(screen.queryByText(/Cloud reports device online/)).toBeNull();
+  expect(screen.queryByText(/Live updates connected/)).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Reading details' })).toBeNull();
+  const info = screen.getByRole('button', { name: 'Reading details' });
+  await fireEvent.click(info);
+  expect(
+    screen.getByRole('region', { name: 'Reading details' }).textContent,
+  ).toContain('Last reading');
+  expect(info.getAttribute('aria-expanded')).toBe('true');
+  await fireEvent.keyDown(window, { key: 'Escape' });
+  expect(screen.queryByRole('region', { name: 'Reading details' })).toBeNull();
+  await fireEvent.click(info);
+  await fireEvent.click(screen.getByRole('heading', { name: 'Thermostat' }));
+  expect(info.getAttribute('aria-expanded')).toBe('false');
   const card = container.querySelector('.thermostat');
   const header = container.querySelector('header');
-  const footer = container.querySelector('footer');
+  expect(container.querySelector('footer')).toBeNull();
   await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
   flushSync(() => FakeEventSource.instances[0].onopen?.());
   expect(container.querySelector('.thermostat')).toBe(card);
   expect(container.querySelector('header')).toBe(header);
-  expect(container.querySelector('footer')).toBe(footer);
+  expect(container.querySelector('footer')).toBeNull();
   expect(
     screen.queryByRole('heading', { name: 'Sign in to OCSTAT' }),
   ).toBeNull();
@@ -105,11 +125,25 @@ it('mounts the complete data screen once and preserves it through stream connect
       finish = r;
     }),
   );
-  await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  const refresh = screen.getByRole('button', { name: 'Refresh readings' });
+  expect(refresh.closest('.ambient')).toBeTruthy();
+  await fireEvent.click(refresh);
+  expect(refresh.hasAttribute('disabled')).toBe(true);
   expect(container.querySelector('.thermostat')).toBe(card);
   expect(target.textContent).toContain('21.5');
   finish(response({ ...signedIn, revision: 2 }));
   await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+  expect(container.querySelector('.thermostat')).toBe(card);
+  await vi.waitFor(() => expect(refresh.hasAttribute('disabled')).toBe(false));
+  request.mockResolvedValue(response({ ...signedIn, revision: 3 }));
+  flushSync(() => FakeEventSource.instances[0].onerror?.());
+  expect(
+    screen.getByText('Connection interrupted. Reconnecting…'),
+  ).toBeTruthy();
+  flushSync(() => FakeEventSource.instances[0].onopen?.());
+  expect(
+    screen.queryByText('Connection interrupted. Reconnecting…'),
+  ).toBeNull();
   expect(container.querySelector('.thermostat')).toBe(card);
 });
 
@@ -122,7 +156,7 @@ it('offers retry on startup failure without showing either account screen', asyn
   const { container } = render(App);
   await screen.findByRole('alert');
   expect(container.querySelector('.thermostat')).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Refresh readings' })).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
   await screen.findByRole('heading', { name: 'Sign in to OCSTAT' });
   expect(screen.queryByRole('alert')).toBeNull();
@@ -146,7 +180,7 @@ it('removes old readings immediately while a revoked session is checked', async 
     FakeEventSource.instances[0].dispatchEvent(new Event('signed_out')),
   );
   expect(screen.queryByLabelText('Desired target temperature')).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Refresh readings' })).toBeNull();
   finish(response(signedOut));
   await screen.findByRole('heading', { name: 'Sign in to OCSTAT' });
 });

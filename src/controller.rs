@@ -15,6 +15,7 @@ use tokio::{
 struct Core {
     state: Snapshot,
     next_id: u64,
+    writes_allowed: bool,
     pending: Option<Command>,
     clients: HashMap<String, u64>,
     pending_login: Option<(String, String)>,
@@ -60,6 +61,11 @@ impl Controller {
         controller.core.lock().unwrap().state.login = Some(LoginState::Required);
         controller
     }
+    pub fn ocstat() -> Self {
+        let controller = Self::ocstat_read_only();
+        controller.core.lock().unwrap().writes_allowed = true;
+        controller
+    }
     fn configured(provider: &str, can_set_target: bool) -> Self {
         let (events, _) = broadcast::channel(64);
         let session = format!(
@@ -73,6 +79,7 @@ impl Controller {
         Self {
             core: Arc::new(Mutex::new(Core {
                 state: Snapshot {
+                    account_email: None,
                     session,
                     revision: 0,
                     provider: provider.into(),
@@ -87,6 +94,7 @@ impl Controller {
                     in_flight: None,
                 },
                 next_id: 0,
+                writes_allowed: can_set_target,
                 pending: None,
                 clients: HashMap::new(),
                 pending_login: None,
@@ -119,7 +127,9 @@ impl Controller {
         core.pending_login = None;
         core.pending = None;
         core.state.login = Some(LoginState::SigningOut);
+        core.state.can_set_target = false;
         core.state.confirmed = None;
+        core.state.account_email = None;
         core.state.desired = None;
         core.state.command = None;
         core.state.in_flight = None;
@@ -171,6 +181,7 @@ impl Controller {
         password: String,
         timing: Timing,
     ) {
+        let account_email = email.clone();
         match timeout(timing.request, provider.login(email, password)).await {
             Ok(Ok(observed)) => {
                 {
@@ -179,6 +190,7 @@ impl Controller {
                         return;
                     }
                     core.state.login = Some(LoginState::Ready);
+                    core.state.account_email = Some(account_email);
                 }
                 self.observe(observed);
             }
@@ -234,6 +246,7 @@ impl Controller {
             id: core.next_id,
             target,
             phase: Phase::Queued,
+            server_accepted: false,
             message: "Queued; waiting to send.".into(),
         };
         core.state.desired = Some(target);
@@ -296,12 +309,44 @@ impl Controller {
         {
             return;
         }
+        let fresh = core
+            .state
+            .confirmed
+            .as_ref()
+            .is_none_or(|old| old.revision < observed.revision);
         core.state.connectivity = if observed.online {
             Connectivity::Online
         } else {
             Connectivity::Offline
         };
         core.state.read_error = None;
+        if core.state.provider == "ocstat" {
+            core.state.can_set_target = core.writes_allowed
+                && core.state.login == Some(LoginState::Ready)
+                && observed.target_writable
+                && observed.online;
+            // Follow changes made in the Android app only when no local intent is outstanding.
+            if core.writes_allowed
+                && core.pending.is_none()
+                && core.state.in_flight.is_none()
+                && core
+                    .state
+                    .command
+                    .as_ref()
+                    .is_none_or(|c| matches!(c.phase, Phase::Confirmed | Phase::TargetMatched))
+            {
+                let current = observed
+                    .requested_temperature
+                    .unwrap_or(observed.target_temperature)
+                    .0
+                    .try_into()
+                    .ok();
+                if core.state.desired != current {
+                    core.state.command = None;
+                }
+                core.state.desired = current;
+            }
+        }
         core.state.last_sync = Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -312,13 +357,15 @@ impl Controller {
         if core.state.can_set_target && core.state.desired.is_none() {
             core.state.desired = observed.target_temperature.0.try_into().ok();
         }
-        if let Some(command) = core.state.command.as_mut() {
-            reconcile(command, &observed);
+        if fresh {
+            if let Some(command) = core.state.command.as_mut() {
+                reconcile(command, &observed);
+            }
+            if let Some(command) = core.state.in_flight.as_mut() {
+                reconcile(command, &observed);
+            }
+            core.state.confirmed = Some(observed);
         }
-        if let Some(command) = core.state.in_flight.as_mut() {
-            reconcile(command, &observed);
-        }
-        core.state.confirmed = Some(observed);
         self.publish(&mut core);
     }
     fn read_failed(&self, error: ProviderError) {
@@ -326,10 +373,22 @@ impl Controller {
         if core.pending_logout {
             return;
         }
-        if error == ProviderError::Authentication && core.state.login == Some(LoginState::Ready) {
+        if matches!(
+            error,
+            ProviderError::Authentication | ProviderError::LoginRequired
+        ) && core.state.login == Some(LoginState::Ready)
+        {
             core.state.login = Some(LoginState::Failed);
             core.state.confirmed = None;
+            core.state.account_email = None;
             core.state.last_sync = None;
+            core.pending = None;
+            core.state.desired = None;
+            core.state.command = None;
+            core.state.in_flight = None;
+        }
+        if core.state.provider == "ocstat" {
+            core.state.can_set_target = false;
         }
         let connectivity = if error == ProviderError::Offline {
             Connectivity::Offline
@@ -379,6 +438,10 @@ impl Controller {
             }
         }
     }
+    fn observation_should_yield(&self) -> bool {
+        let core = self.core.lock().unwrap();
+        core.pending_logout || core.pending.is_some()
+    }
     async fn execute(&self, provider: &dyn Provider, command: Command, timing: Timing) {
         let id = command.id;
         match timeout(timing.request, provider.send_target(id, command.target)).await {
@@ -402,7 +465,7 @@ impl Controller {
                 self.phase(
                     id,
                     Phase::Rejected,
-                    "Request rejected. Check simulator settings and retry.",
+                    "Request rejected. The desired target is retained.",
                 );
                 self.finish(id);
                 return;
@@ -420,11 +483,19 @@ impl Controller {
         }
         let deadline = Instant::now() + timing.confirmation;
         loop {
+            // Finish the active write before yielding. A newer target supersedes
+            // only observation of the old target, never its in-flight exchange.
+            if self.observation_should_yield() {
+                break;
+            }
             self.sync(provider, timing).await;
-            let confirmed = self
-                .snapshot()
-                .in_flight
-                .is_some_and(|c| c.id == id && c.phase == Phase::Confirmed);
+            // A request may have arrived while the read was in progress.
+            if self.observation_should_yield() {
+                break;
+            }
+            let confirmed = self.snapshot().in_flight.is_some_and(|c| {
+                c.id == id && matches!(c.phase, Phase::Confirmed | Phase::TargetMatched)
+            });
             if confirmed {
                 break;
             }
@@ -432,7 +503,25 @@ impl Controller {
                 self.phase(id, Phase::Unknown, "Device application is unverified. Automatic reconciliation continues; refresh or retry when connected.");
                 break;
             }
-            sleep(timing.poll).await;
+            let interval = if self.snapshot().provider == "ocstat" {
+                Duration::from_secs(2)
+            } else {
+                timing.poll
+            };
+            let poll = sleep(interval);
+            tokio::pin!(poll);
+            loop {
+                tokio::select! {
+                    _ = &mut poll => break,
+                    _ = self.wake.notified() => {
+                        if self.observation_should_yield() {
+                            break;
+                        }
+                        // An enqueue notification can predate the active write.
+                        // Consuming it must not shorten the next polling interval.
+                    },
+                }
+            }
         }
         self.finish(id);
     }
@@ -443,13 +532,20 @@ impl Default for Controller {
     }
 }
 fn reconcile(command: &mut Command, observed: &DeviceState) {
-    if observed.applied_command == Some(command.id)
+    if observed.online
+        && observed.applied_command == Some(command.id)
         && observed.target_temperature.0 == i16::from(command.target)
     {
         command.transition(
             Phase::Confirmed,
             "Device confirmed this target temperature.",
         );
+    } else if observed.online
+        && observed.matched_command == Some(command.id)
+        && observed.requested_temperature == Some(Temperature(command.target.into()))
+        && observed.target_temperature.0 == i16::from(command.target)
+    {
+        command.transition(Phase::TargetMatched, "The requested target and cloud status match on two consecutive reads. This is a cloud observation, not a command acknowledgement from the device.");
     }
 }
 
@@ -462,9 +558,13 @@ mod tests {
     }
     fn observation(revision: u64, id: Option<u64>, target_value: i16) -> DeviceState {
         DeviceState {
+            device_name: None,
             revision,
             applied_command: id,
+            matched_command: None,
+            target_writable: true,
             target_temperature: Temperature(target_value),
+            requested_temperature: None,
             online: true,
             room_temperature: Temperature(208),
             mode: Mode::Manual,
@@ -627,8 +727,15 @@ mod tests {
         assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert!(!c.snapshot().can_set_target);
         assert!(c.snapshot().confirmed.is_some());
+        assert_eq!(
+            c.snapshot().account_email.as_deref(),
+            Some("example@example.invalid")
+        );
         assert!(c.submit_login("other".into(), "other".into()).is_err());
         assert!(c.submit(target(220)).is_err());
+        c.read_failed(ProviderError::Authentication);
+        assert!(c.snapshot().account_email.is_none());
+        assert!(c.snapshot().confirmed.is_none());
         worker.abort();
     }
     #[tokio::test(start_paused = true)]
@@ -717,6 +824,33 @@ mod tests {
         assert_eq!(c.snapshot().confirmed.unwrap().revision, 7);
     }
     #[test]
+    fn cloud_match_can_later_gain_verified_application_evidence() {
+        let c = Controller::new();
+        c.observe(observation(1, None, 215));
+        c.submit(target(225)).unwrap();
+        let command = c.take_pending().unwrap();
+        c.phase(command.id, Phase::AcceptedByCloud, "ack");
+        c.phase(command.id, Phase::AwaitingDevice, "wait");
+        let mut matched = observation(2, None, 225);
+        matched.matched_command = Some(command.id);
+        matched.requested_temperature = Some(Temperature(225));
+        c.observe(matched);
+        assert_eq!(c.snapshot().command.unwrap().phase, Phase::TargetMatched);
+        // A duplicate observation cannot introduce evidence; nor can another command.
+        c.observe(observation(2, Some(command.id), 225));
+        c.observe(observation(3, Some(command.id + 1), 225));
+        let mut offline = observation(4, Some(command.id), 225);
+        offline.online = false;
+        c.observe(offline);
+        c.observe(observation(5, Some(command.id), 215));
+        assert_eq!(c.snapshot().command.unwrap().phase, Phase::TargetMatched);
+        c.observe(observation(6, Some(command.id), 225));
+        let final_command = c.snapshot().command.unwrap();
+        assert_eq!(final_command.phase, Phase::Confirmed);
+        assert!(final_command.server_accepted);
+    }
+
+    #[test]
     fn repeated_target_requires_new_application_evidence() {
         let c = Controller::new();
         c.submit(target(220)).unwrap();
@@ -732,6 +866,31 @@ mod tests {
         c.observe(observation(2, Some(first.id), 220));
         assert_eq!(c.snapshot().command.unwrap().phase, Phase::AwaitingDevice);
         c.observe(observation(3, Some(second.id), 220));
+        assert_eq!(c.snapshot().command.unwrap().phase, Phase::Confirmed);
+    }
+
+    #[test]
+    fn requested_equality_offline_and_duplicate_reads_do_not_confirm() {
+        let c = Controller::new();
+        c.observe(observation(1, None, 215));
+        c.submit(target(225)).unwrap();
+        let command = c.take_pending().unwrap();
+        c.phase(command.id, Phase::AcceptedByCloud, "accepted");
+        c.phase(command.id, Phase::AwaitingDevice, "waiting");
+        let mut lagging = observation(2, None, 215);
+        lagging.requested_temperature = Some(Temperature(225));
+        c.observe(lagging);
+        assert_eq!(c.snapshot().command.unwrap().phase, Phase::AwaitingDevice);
+        // Even a newer matching reported value has no OCSTAT command correlation.
+        c.observe(observation(3, None, 225));
+        assert_eq!(c.snapshot().command.unwrap().phase, Phase::AwaitingDevice);
+        c.observe(observation(3, Some(command.id), 225));
+        assert_eq!(c.snapshot().command.unwrap().phase, Phase::AwaitingDevice);
+        let mut offline = observation(4, Some(command.id), 225);
+        offline.online = false;
+        c.observe(offline);
+        assert_eq!(c.snapshot().command.unwrap().phase, Phase::AwaitingDevice);
+        c.observe(observation(5, Some(command.id), 225));
         assert_eq!(c.snapshot().command.unwrap().phase, Phase::Confirmed);
     }
 
@@ -787,6 +946,203 @@ mod tests {
         );
         worker.abort();
     }
+    #[tokio::test(start_paused = true)]
+    async fn newer_target_waits_for_write_but_not_obsolete_confirmation() {
+        for scenario in [
+            Scenario::Normal,
+            Scenario::ReplyLost,
+            Scenario::AckTimeout,
+            Scenario::Rejected,
+        ] {
+            let c = Controller::new();
+            let mut events = c.subscribe();
+            let provider = Arc::new(Simulator::new(Config {
+                scenario,
+                ack_ms: 100,
+                apply_ms: 60_000,
+            }));
+            let timing = Timing {
+                request: Duration::from_millis(200),
+                confirmation: Duration::from_secs(30),
+                poll: Duration::from_secs(2),
+            };
+            let worker = tokio::spawn(c.clone().run(provider, timing));
+            c.submit(target(220)).unwrap();
+            while !events
+                .recv()
+                .await
+                .unwrap()
+                .in_flight
+                .is_some_and(|c| c.phase == Phase::Sending)
+            {}
+            let started = Instant::now();
+            c.submit(target(225)).unwrap();
+            c.submit(target(230)).unwrap();
+            tokio::time::advance(Duration::from_millis(99)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                c.snapshot().in_flight.unwrap().id,
+                1,
+                "must not cancel an active write"
+            );
+            assert_eq!(c.snapshot().command.unwrap().phase, Phase::Queued);
+            loop {
+                let state = events.recv().await.unwrap();
+                if let Some(active) = state.in_flight {
+                    assert_ne!(
+                        active.id, 2,
+                        "intermediate pending target must be coalesced"
+                    );
+                    if active.id == 3 && active.phase == Phase::Sending {
+                        break;
+                    }
+                }
+            }
+            let expected = if scenario == Scenario::AckTimeout {
+                200
+            } else {
+                100
+            };
+            assert_eq!(started.elapsed(), Duration::from_millis(expected));
+            assert_eq!(c.snapshot().desired, Some(target(230)));
+            // Neither a superseded reply nor the switch to a newer request is
+            // evidence of application, or acceptance of that newer request.
+            assert!(!c.snapshot().command.unwrap().server_accepted);
+            worker.abort();
+            let _ = worker.await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn new_target_wakes_observation_sleep_without_shortening_normal_polling() {
+        let c = Controller::new();
+        let mut events = c.subscribe();
+        let provider = Arc::new(Simulator::new(Config {
+            ack_ms: 100,
+            apply_ms: 60_000,
+            ..Config::default()
+        }));
+        let timing = Timing {
+            request: Duration::from_secs(3),
+            confirmation: Duration::from_secs(30),
+            poll: Duration::from_secs(2),
+        };
+        c.submit(target(220)).unwrap();
+        let worker = tokio::spawn(c.clone().run(provider, timing));
+        // A snapshot after acceptance is the first observation, then the worker sleeps.
+        let mut awaiting_seen = false;
+        let observed_revision = loop {
+            let state = events.recv().await.unwrap();
+            if state
+                .command
+                .as_ref()
+                .is_some_and(|c| c.phase == Phase::AwaitingDevice)
+            {
+                if awaiting_seen {
+                    break state.revision;
+                }
+                awaiting_seen = true;
+            }
+        };
+        tokio::time::advance(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            c.snapshot().revision,
+            observed_revision,
+            "stale wake must not trigger an extra read"
+        );
+        let queued = Instant::now();
+        c.submit(target(225)).unwrap();
+        loop {
+            if events
+                .recv()
+                .await
+                .unwrap()
+                .in_flight
+                .is_some_and(|c| c.id == 2 && c.phase == Phase::Sending)
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            queued.elapsed(),
+            Duration::ZERO,
+            "must wake before the two-second poll timer"
+        );
+        worker.abort();
+        let _ = worker.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn newer_target_waits_for_active_read_and_ignores_old_application_evidence() {
+        struct SlowRead {
+            reads: std::sync::atomic::AtomicUsize,
+            started: Notify,
+            release: Notify,
+        }
+        impl Provider for SlowRead {
+            fn read(&self) -> crate::provider::ProviderFuture<'_, DeviceState> {
+                Box::pin(async {
+                    let read = self
+                        .reads
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if read == 1 {
+                        self.started.notify_one();
+                        self.release.notified().await;
+                    }
+                    Ok(observation(read as u64 + 1, (read > 0).then_some(1), 220))
+                })
+            }
+            fn send_target(
+                &self,
+                id: u64,
+                _: TargetTemperature,
+            ) -> crate::provider::ProviderFuture<'_, ()> {
+                Box::pin(async move {
+                    if id > 1 {
+                        // Keep the new write open so its lack of acceptance can be asserted.
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(())
+                })
+            }
+        }
+        let c = Controller::new();
+        let provider = Arc::new(SlowRead {
+            reads: 0.into(),
+            started: Notify::new(),
+            release: Notify::new(),
+        });
+        let mut events = c.subscribe();
+        c.submit(target(220)).unwrap();
+        let worker = tokio::spawn(c.clone().run(provider.clone(), Timing::default()));
+        provider.started.notified().await;
+        // Same target, different request: old evidence cannot acknowledge this one.
+        c.submit(target(220)).unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(c.snapshot().in_flight.unwrap().id, 1);
+        assert_eq!(c.snapshot().command.unwrap().phase, Phase::Queued);
+        let released = Instant::now();
+        provider.release.notify_one();
+        loop {
+            if events
+                .recv()
+                .await
+                .unwrap()
+                .in_flight
+                .is_some_and(|c| c.id == 2 && c.phase == Phase::Sending)
+            {
+                break;
+            }
+        }
+        assert_eq!(released.elapsed(), Duration::ZERO);
+        assert!(!c.snapshot().command.unwrap().server_accepted);
+        assert_eq!(c.snapshot().confirmed.unwrap().applied_command, Some(1));
+        assert_eq!(provider.reads.load(std::sync::atomic::Ordering::Relaxed), 2);
+        worker.abort();
+        let _ = worker.await;
+    }
+
     async fn exercise(scenario: Scenario) -> (Controller, Vec<Phase>) {
         let c = Controller::new();
         let provider = Simulator::new(Config {

@@ -4,7 +4,7 @@
   import { temperature } from './types';
   let { dashboard }: { dashboard: Dashboard } = $props();
   const id = $props.id();
-  const checkpoints = [
+  let checkpoints = $derived([
     {
       name: 'Target selected',
       detail:
@@ -21,10 +21,16 @@
         'The server accepted the target. Device application still needs confirmation.',
     },
     {
-      name: 'Synced with device',
-      detail: 'The device has confirmed your target temperature.',
+      name:
+        dashboard.state?.provider === 'ocstat'
+          ? 'Target matches device'
+          : 'Synced with device',
+      detail:
+        dashboard.state?.provider === 'ocstat'
+          ? 'The requested and device-reported targets match. Cloud readings may lag behind the thermostat.'
+          : 'The device has confirmed your target temperature.',
     },
-  ];
+  ]);
   let progress = $derived(commandProgress(dashboard));
   let hovered = $state<number | null>(null);
   let focused = $state<number | null>(null);
@@ -50,7 +56,8 @@
   class="command-progress"
   class:has-issue={progress.issue}
   class:synced={progress.checkpoint === 3}
-  class:working={!progress.issue &&
+  class:working={!dashboard.debouncing &&
+    !progress.issue &&
     (progress.checkpoint === 1 || progress.checkpoint === 2)}
 >
   <div
@@ -93,6 +100,15 @@
         onkeydown={dismiss}
       >
         <span class="checkpoint-disc">
+          {#if index === 0}
+            <span
+              class="debounce-glow"
+              class:active={dashboard.debouncing}
+              aria-hidden="true"
+            ></span>
+          {:else}
+            <span class="checkpoint-activity" aria-hidden="true"></span>
+          {/if}
           <svg
             class="milestone-icon"
             viewBox="0 0 24 24"
@@ -241,6 +257,25 @@
     grid-area: 1 / 1;
     transition: opacity 250ms ease;
   }
+  /* Persistent layers cross-fade; repeated edits never restart an animation. */
+  .debounce-glow,
+  .checkpoint-activity {
+    position: absolute;
+    inset: -5px;
+    border-radius: inherit;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 180ms ease;
+  }
+  .debounce-glow {
+    box-shadow: 0 0 10px 3px var(--accent);
+  }
+  .debounce-glow.active {
+    opacity: 0.35;
+  }
+  .working .current .checkpoint-activity {
+    opacity: 1;
+  }
   .reached {
     color: var(--accent);
   }
@@ -251,15 +286,18 @@
   .current .checkpoint-disc {
     box-shadow: 0 0 0 4px var(--soft);
   }
-  /* One quiet halo follows the active checkpoint, including device confirmation. */
-  .working .current .checkpoint-disc::after {
+  /* Pause the hidden pulse in place so a new edit can fade it out smoothly. */
+  .checkpoint-activity::after {
     content: '';
     position: absolute;
-    inset: -5px;
+    inset: 0;
     border: 1px solid var(--accent);
     border-radius: inherit;
-    pointer-events: none;
     animation: checkpoint-breathe 1800ms ease-in-out infinite;
+    animation-play-state: paused;
+  }
+  .working .current .checkpoint-activity::after {
+    animation-play-state: running;
   }
   @keyframes checkpoint-breathe {
     0%,

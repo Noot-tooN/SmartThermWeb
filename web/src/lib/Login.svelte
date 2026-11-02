@@ -33,7 +33,7 @@
         headers: { 'Content-Type': 'application/json' },
         body,
         cache: 'no-store',
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(40000),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -65,8 +65,7 @@
       dashboard.useSession(data);
       email = '';
     } catch {
-      error =
-        'Could not reach SmartThermWeb. Refresh to check whether login started.';
+      error = 'Could not connect. Refresh to check whether sign-in completed.';
     } finally {
       sending = false;
     }
@@ -78,7 +77,6 @@
   aria-labelledby="login-title"
   aria-busy={busy}
 >
-  <p class="eyebrow">YOUR THERMOSTAT</p>
   <h1 id="login-title">Sign in to OCSTAT</h1>
   <p class="muted">Use the account you use in the SmartTherm app.</p>
   <form onsubmit={submit}>
@@ -114,9 +112,6 @@
         Signing in and loading your thermostat…
       </p>{/if}
   </form>
-  <p class="muted privacy-note">
-    Use your existing OCSTAT account. Temperature changes remain disabled.
-  </p>
 </section>
 
 <style>
@@ -137,8 +132,5 @@
     margin: 0;
     font-size: 13px;
     line-height: 1.5;
-  }
-  .privacy-note {
-    margin: 24px 0 0;
   }
 </style>

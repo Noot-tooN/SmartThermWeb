@@ -57,12 +57,16 @@ impl Simulator {
             inner: Mutex::new(Inner {
                 config,
                 device: DeviceState {
+                    device_name: Some("Simulated thermostat".into()),
                     room_temperature: Temperature(208),
                     target_temperature: Temperature(215),
+                    requested_temperature: None,
                     online: true,
                     mode: Mode::Manual,
                     revision: 1,
                     applied_command: None,
+                    matched_command: None,
+                    target_writable: true,
                 },
                 pending: vec![],
             }),

@@ -124,7 +124,8 @@ impl IntoResponse for ApiError {
             Self::ReadOnly => (
                 StatusCode::FORBIDDEN,
                 "read_only",
-                "This provider is read-only; temperature changes are disabled.".into(),
+                "Temperature changes are unavailable for the current session or device state."
+                    .into(),
             ),
             Self::NotSimulator => (
                 StatusCode::NOT_FOUND,
@@ -294,22 +295,32 @@ struct TargetRequest {
 }
 async fn set_target(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<TargetRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if !state.controller.snapshot().can_set_target {
+    let controller = if state.sessions.is_some() {
+        if !local_same_origin(&headers) {
+            return Err(ApiError::InvalidOrigin);
+        }
+        browser_session(&state, &headers)
+            .ok_or(ApiError::Unauthenticated)?
+            .controller
+            .clone()
+    } else {
+        state.controller
+    };
+    if !controller.snapshot().can_set_target {
         return Err(ApiError::ReadOnly);
     }
     let Json(body) = body.map_err(|e| ApiError::Invalid(e.body_text()))?;
     let snapshot = match (body.client_id, body.client_revision) {
-        (None, None) => state
-            .controller
+        (None, None) => controller
             .submit(body.target_temperature)
             .map_err(|_| ApiError::ReadOnly)?,
         (Some(client), Some(revision))
             if !client.is_empty() && client.len() <= 80 && revision > 0 =>
         {
-            state
-                .controller
+            controller
                 .submit_from(body.target_temperature, client, revision)
                 .map_err(|error| match error {
                     SubmitError::StaleRevision => ApiError::StaleRevision,

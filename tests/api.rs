@@ -35,6 +35,9 @@ async fn target_validation_and_typed_errors() {
     for body in [
         r#"{"target_temperature":214}"#,
         r#"{"target_temperature":301}"#,
+        r#"{"target_temperature":49}"#,
+        r#"{"target_temperature":351}"#,
+        r#"{"target_temperature":355}"#,
         r#"{"target_temperature":21.5}"#,
         r#"{"target_temperature":220,"surprise":1}"#,
         r#"{"target_temperature":220,"client_id":"x"}"#,
@@ -46,6 +49,14 @@ async fn target_validation_and_typed_errors() {
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(value["error"]["code"], "invalid_request");
+    }
+    for target in [50, 305, 350] {
+        let response = app
+            .clone()
+            .oneshot(put(&format!(r#"{{"target_temperature":{target}}}"#)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
     let response = app
         .oneshot(put(r#"{"target_temperature":230}"#))
@@ -160,7 +171,7 @@ async fn simulator_configuration_is_validated() {
 }
 
 #[tokio::test]
-async fn ocstat_is_read_only_at_api_and_controller_boundaries() {
+async fn signed_out_ocstat_cannot_write_or_access_simulator_settings() {
     let controller = Controller::ocstat_read_only();
     let app = router(AppState {
         controller: controller.clone(),
@@ -172,12 +183,19 @@ async fn ocstat_is_read_only_at_api_and_controller_boundaries() {
         r#"{"target_temperature":220,"client_id":"x","client_revision":1}"#,
         "invalid",
     ] {
-        let response = app.clone().oneshot(put(body)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let mut request = put(body);
+        request
+            .headers_mut()
+            .insert("host", "localhost:3000".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("origin", "http://localhost:3000".parse().unwrap());
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
-            "read_only"
+            "unauthenticated"
         );
     }
     assert!(controller.submit(220.try_into().unwrap()).is_err());
@@ -286,7 +304,7 @@ async fn browser_login_rejects_cross_site_requests_and_never_echoes_credentials(
     assert!(!String::from_utf8_lossy(&bytes).contains("TEST_PASSWORD_ONLY"));
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(value["login"], "ready");
-    assert_eq!(value["can_set_target"], false);
+    assert_eq!(value["can_set_target"], true);
     let mut again = login_request(body, "127.0.0.1:3000", "http://127.0.0.1:3000");
     again
         .headers_mut()
@@ -375,16 +393,27 @@ impl smartthermweb::provider::Provider for FakeAccount {
                 return Err(ProviderError::Authentication);
             }
             let state = DeviceState {
+                device_name: Some(
+                    if email.starts_with("second") {
+                        "Bedroom"
+                    } else {
+                        "Living room"
+                    }
+                    .into(),
+                ),
                 room_temperature: Temperature(if email.starts_with("second") {
                     190
                 } else {
                     210
                 }),
                 target_temperature: Temperature(215),
+                requested_temperature: None,
                 online: true,
                 mode: Mode::Unknown("unverified".into()),
                 revision: 1,
                 applied_command: None,
+                matched_command: None,
+                target_writable: true,
             };
             *self.0.lock().unwrap() = Some(state.clone());
             Ok(state)
@@ -403,10 +432,20 @@ impl smartthermweb::provider::Provider for FakeAccount {
     }
     fn send_target(
         &self,
-        _: u64,
-        _: smartthermweb::domain::TargetTemperature,
+        id: u64,
+        target: smartthermweb::domain::TargetTemperature,
     ) -> smartthermweb::provider::ProviderFuture<'_, ()> {
-        panic!("real-mode writes must never reach the provider")
+        Box::pin(async move {
+            let mut guard = self.0.lock().unwrap();
+            let state = guard
+                .as_mut()
+                .ok_or(smartthermweb::provider::ProviderError::LoginRequired)?;
+            state.target_temperature = smartthermweb::domain::Temperature(target.into());
+            state.requested_temperature = Some(state.target_temperature);
+            state.matched_command = Some(id);
+            state.revision += 1;
+            Ok(())
+        })
     }
 }
 fn cloud_app() -> axum::Router {
@@ -448,10 +487,10 @@ async fn sign_in(app: &axum::Router, email: &str) -> String {
     let cookie = header.split(';').next().unwrap().to_owned();
     let state = json(response).await;
     assert_eq!(state["login"], "ready");
+    assert_eq!(state["account_email"], email);
     let serialized = state.to_string();
     assert!(
-        !serialized.contains(email)
-            && !serialized.contains("TEST_PASSWORD_ONLY")
+        !serialized.contains("TEST_PASSWORD_ONLY")
             && !serialized.contains(cookie.split('=').nth(1).unwrap())
     );
     cookie
@@ -478,11 +517,15 @@ async fn browser_sessions_isolate_readings_logout_and_streams() {
     .await;
     assert_eq!(anonymous["login"], "required");
     assert!(anonymous["confirmed"].is_null());
+    assert!(anonymous["account_email"].is_null());
     let first = sign_in(&app, "first@example.invalid").await;
     tokio::time::advance(std::time::Duration::from_secs(10)).await;
     let second = sign_in(&app, "second@example.invalid").await;
     assert_ne!(first, second);
-    for (cookie, temperature) in [(&first, 210), (&second, 190)] {
+    for (cookie, temperature, email, name) in [
+        (&first, 210, "first@example.invalid", "Living room"),
+        (&second, 190, "second@example.invalid", "Bedroom"),
+    ] {
         let state = json(
             app.clone()
                 .oneshot(get_with_cookie("/api/thermostat", cookie))
@@ -491,7 +534,9 @@ async fn browser_sessions_isolate_readings_logout_and_streams() {
         )
         .await;
         assert_eq!(state["confirmed"]["room_temperature"], temperature);
-        assert_eq!(state["can_set_target"], false);
+        assert_eq!(state["account_email"], email);
+        assert_eq!(state["confirmed"]["device_name"], name);
+        assert_eq!(state["can_set_target"], true);
     }
     let mut stream = app
         .clone()
@@ -516,7 +561,10 @@ async fn browser_sessions_isolate_readings_logout_and_streams() {
             .unwrap()
             .contains("Max-Age=0")
     );
-    assert_eq!(json(response).await["login"], "required");
+    let signed_out = json(response).await;
+    assert_eq!(signed_out["login"], "required");
+    assert!(signed_out["account_email"].is_null());
+    assert!(signed_out["confirmed"].is_null());
     let closed = stream.frame().await.unwrap().unwrap().into_data().unwrap();
     assert!(String::from_utf8_lossy(&closed).contains("signed_out"));
     assert!(stream.frame().await.is_none());
@@ -589,4 +637,67 @@ async fn rejected_login_never_creates_a_session_and_is_rate_limited() {
         .unwrap();
     assert!(response.headers().get("set-cookie").is_none());
     assert_eq!(json(response).await["login"], "required");
+}
+
+#[tokio::test(start_paused = true)]
+async fn authenticated_target_writes_require_same_origin_and_stay_in_their_browser_session() {
+    let app = cloud_app();
+    let first = sign_in(&app, "first@example.invalid").await;
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    let second = sign_in(&app, "second@example.invalid").await;
+    let request = |cookie: &str, origin: &str| {
+        Request::builder()
+            .method("PUT")
+            .uri("/api/thermostat/target")
+            .header("host", "localhost:3000")
+            .header("origin", origin)
+            .header("cookie", cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"target_temperature":225,"client_id":"browser-a","client_revision":1}"#,
+            ))
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(request("", "http://localhost:3000"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(&first, "https://example.invalid"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = app
+        .clone()
+        .oneshot(request(&first, "http://localhost:3000"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let queued = json(response).await;
+    assert_eq!(queued["desired"], 225);
+    assert_eq!(queued["account_email"], "first@example.invalid");
+    assert_eq!(
+        app.clone()
+            .oneshot(request(&first, "http://localhost:3000"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let other = json(
+        app.clone()
+            .oneshot(get_with_cookie("/api/thermostat", &second))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(other["desired"], 215);
+    assert!(other["command"].is_null());
 }

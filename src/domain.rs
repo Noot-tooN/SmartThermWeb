@@ -19,15 +19,16 @@ impl fmt::Display for Temperature {
     }
 }
 
-/// Simulator bounds, NOT an assertion about the real thermostat's capabilities.
+/// Target range matches the inspected type-22 Android control screen (5–35°C).
+/// This is client-protocol evidence, not physical testing of every setpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "i16", into = "i16")]
 pub struct TargetTemperature(i16);
 impl TryFrom<i16> for TargetTemperature {
     type Error = &'static str;
     fn try_from(value: i16) -> Result<Self, Self::Error> {
-        if !(50..=300).contains(&value) || value % 5 != 0 {
-            Err("Target must be 50–300 tenths of °C, in steps of 5 (0.5°C).")
+        if !(50..=350).contains(&value) || value % 5 != 0 {
+            Err("Target must be 50–350 tenths of °C, in steps of 5 (0.5°C).")
         } else {
             Ok(Self(value))
         }
@@ -44,6 +45,7 @@ impl From<TargetTemperature> for i16 {
 pub enum Mode {
     Manual,
     Schedule,
+    TemporaryOverride,
     Off,
     Unknown(String),
 }
@@ -65,6 +67,7 @@ pub enum Phase {
     AcceptedByCloud,
     AwaitingDevice,
     Confirmed,
+    TargetMatched,
     Rejected,
     TransportFailed,
     TimedOut,
@@ -81,8 +84,15 @@ impl Phase {
                     AcceptedByCloud | Rejected | TransportFailed | TimedOut
                 )
                 | (AcceptedByCloud, AwaitingDevice)
-                | (AwaitingDevice, Confirmed | TimedOut | Unknown)
-                | (TransportFailed | TimedOut | Unknown, Confirmed)
+                | (TargetMatched, Confirmed)
+                | (
+                    AwaitingDevice,
+                    Confirmed | TargetMatched | TimedOut | Unknown
+                )
+                | (
+                    TransportFailed | TimedOut | Unknown,
+                    Confirmed | TargetMatched
+                )
         )
     }
 }
@@ -92,12 +102,18 @@ pub struct Command {
     pub id: u64,
     pub target: TargetTemperature,
     pub phase: Phase,
+    /// Set only by an explicit successful upstream write response; survives later phases.
+    #[serde(default)]
+    pub server_accepted: bool,
     pub message: String,
 }
 impl Command {
     pub fn transition(&mut self, phase: Phase, message: &str) -> bool {
         if !self.phase.allows(phase) {
             return false;
+        }
+        if phase == Phase::AcceptedByCloud {
+            self.server_accepted = true;
         }
         self.phase = phase;
         self.message = message.into();
@@ -107,14 +123,29 @@ impl Command {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceState {
+    /// Display name only; never the manufacturer device identifier.
+    #[serde(default)]
+    pub device_name: Option<String>,
     pub room_temperature: Temperature,
+    /// Provider-observed target; OCSTAT supplies cloud status, not verified device state.
+    /// Retrieval is not a freshness or command-correlation guarantee.
     pub target_temperature: Temperature,
+    /// Cloud-requested target, separate from the reported value (OCSTAT only).
+    #[serde(default)]
+    pub requested_temperature: Option<Temperature>,
     pub online: bool,
     pub mode: Mode,
     /// Provider monotonic observation revision, not a wall-clock timestamp.
     pub revision: u64,
     /// Present ONLY when the provider has evidence correlating application to a command.
     pub applied_command: Option<u64>,
+    /// Local attempt whose target matched two subsequent cloud observations.
+    /// This is not device-origin command acknowledgement or a freshness guarantee.
+    #[serde(default)]
+    pub matched_command: Option<u64>,
+    /// Provider supports target changes in this observed operating context.
+    #[serde(default)]
+    pub target_writable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +160,8 @@ pub enum LoginState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Signed-in email for the account header, absent before login and after logout.
+    pub account_email: Option<String>,
     pub session: String,
     pub revision: u64,
     pub provider: String,
@@ -151,10 +184,10 @@ mod tests {
     fn exact_temperatures_and_validation() {
         assert_eq!(Temperature(215).to_string(), "21.5°C");
         assert_eq!(Temperature(-5).to_string(), "-0.5°C");
-        for value in [50, 215, 300] {
+        for value in [50, 215, 300, 305, 345, 350] {
             assert!(TargetTemperature::try_from(value).is_ok());
         }
-        for value in [-5, 49, 214, 301] {
+        for value in [-5, 49, 214, 301, 351, 355] {
             assert!(TargetTemperature::try_from(value).is_err());
         }
         assert!(serde_json::from_str::<TargetTemperature>("21.5").is_err());
@@ -174,5 +207,26 @@ mod tests {
         assert!(TimedOut.allows(Confirmed));
         assert!(TransportFailed.allows(Confirmed));
         assert!(AwaitingDevice.allows(Unknown));
+    }
+    #[test]
+    fn server_acceptance_survives_later_phases_but_cannot_be_inferred_from_matches() {
+        let mut command = Command {
+            id: 1,
+            target: 225.try_into().unwrap(),
+            phase: Phase::Queued,
+            server_accepted: false,
+            message: String::new(),
+        };
+        command.transition(Phase::Sending, "sending");
+        let mut lost_reply = command.clone();
+        command.transition(Phase::AcceptedByCloud, "accepted");
+        command.transition(Phase::AwaitingDevice, "waiting");
+        command.transition(Phase::TargetMatched, "cloud values match");
+        let restored: Command =
+            serde_json::from_str(&serde_json::to_string(&command).unwrap()).unwrap();
+        assert!(restored.server_accepted);
+        lost_reply.transition(Phase::TransportFailed, "no reply");
+        lost_reply.transition(Phase::TargetMatched, "cloud values match");
+        assert!(!lost_reply.server_accepted);
     }
 }

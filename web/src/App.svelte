@@ -4,6 +4,7 @@
   import Thermostat from './lib/Thermostat.svelte';
   import Login from './lib/Login.svelte';
   import AccountActions from './lib/AccountActions.svelte';
+  import AccountHeader from './lib/AccountHeader.svelte';
   import type { Scenario, SimConfig } from './lib/types';
   const dashboard = new Dashboard();
   let scenario = $state<Scenario>('normal');
@@ -77,14 +78,18 @@
     if (!mounted || !streamWanted) return;
     const generation = dashboard.authGeneration;
     dashboard.streamConnected = false;
+    dashboard.streamReconnecting = false;
     const source = new EventSource('/api/events');
     source.onopen = () => {
-      if (generation === dashboard.authGeneration)
+      if (generation === dashboard.authGeneration) {
         dashboard.streamConnected = true;
+        dashboard.streamReconnecting = false;
+      }
     };
     source.onerror = () => {
       if (generation !== dashboard.authGeneration) return;
       dashboard.streamConnected = false;
+      dashboard.streamReconnecting = true;
       void dashboard.refresh();
     };
     source.addEventListener('signed_out', () => {
@@ -102,32 +107,22 @@
     return () => {
       source.close();
       dashboard.streamConnected = false;
+      dashboard.streamReconnecting = false;
     };
   });
 </script>
 
 <svelte:head
-  ><meta
-    name="description"
-    content="A responsive, self-hosted thermostat dashboard with truthful command feedback."
-  /></svelte:head
+  ><meta name="description" content="Home heating controls." /></svelte:head
 >
 <main>
   <header>
-    <a class="brand" href="/" aria-label="SmartThermWeb home"
-      ><span class="brand-mark" aria-hidden="true">⌂</span>SmartTherm<span
-        >Web</span
-      ></a
-    >
     <div class="header-actions">
-      {#if dashboard.state}
-        <span class="demo-badge"
-          >{dashboard.state?.provider === 'ocstat'
-            ? 'READ ONLY'
-            : 'SIMULATOR'}</span
-        >
-        <AccountActions {dashboard} />
-      {/if}
+      {#if dashboard.state?.provider === 'simulator'}<span class="demo-badge"
+          >Simulator</span
+        >{/if}
+      <AccountHeader {dashboard} />
+      <AccountActions {dashboard} />
     </div>
   </header>
   {#if !dashboard.state}
@@ -146,9 +141,7 @@
           }}>Try again</button
         >
       {:else}
-        <p class="muted loading-message" role="status">
-          Loading SmartThermWeb…
-        </p>
+        <p class="muted loading-message" role="status">Loading…</p>
       {/if}
     </section>
   {:else}
@@ -160,37 +153,7 @@
     {:else if dashboard.state?.login && dashboard.state.login !== 'ready'}
       <Login {dashboard} />
     {:else}
-      <div class="connection-row">
-        <span
-          class:online={dashboard.state?.connectivity === 'online'}
-          class="connection"
-          ><i></i>{dashboard.state?.connectivity === 'online'
-            ? dashboard.state?.provider === 'ocstat'
-              ? 'Cloud reports device online'
-              : 'Device online'
-            : dashboard.state?.connectivity === 'offline'
-              ? 'Device offline'
-              : dashboard.state?.connectivity === 'unavailable'
-                ? 'Device status unavailable'
-                : 'Connecting to device'}</span
-        ><span class="muted"
-          >{dashboard.streamConnected
-            ? 'Live updates connected'
-            : 'Live updates reconnecting…'}</span
-        >
-      </div>
       <Thermostat {dashboard} />
-      <div class="sync-row">
-        <span
-          >{dashboard.state?.provider === 'ocstat'
-            ? 'Last cloud read'
-            : 'Last synchronized'}: {dashboard.state?.last_sync
-            ? new Date(dashboard.state.last_sync * 1000).toLocaleTimeString()
-            : 'Waiting for a reading'}</span
-        ><button class="text-button" onclick={() => dashboard.refresh()}
-          >Refresh</button
-        >
-      </div>
       {#if dashboard.state?.provider === 'simulator'}
         <details class="simulator-panel">
           <summary
@@ -253,18 +216,17 @@
         </details>
       {/if}
     {/if}
-    <footer>
-      SmartThermWeb <span aria-hidden="true">·</span> Local control. Clear feedback.
-    </footer>
   {/if}
 </main>
 
 <style>
   .header-actions {
+    margin-left: auto;
     display: flex;
     align-items: center;
     gap: 16px;
     min-height: 44px;
+    min-width: 0;
   }
   .page-status {
     position: absolute;
@@ -281,11 +243,6 @@
     }
     to {
       opacity: 1;
-    }
-  }
-  @media (max-width: 480px) {
-    .header-actions {
-      justify-content: flex-end;
     }
   }
 </style>

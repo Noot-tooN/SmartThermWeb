@@ -1,17 +1,21 @@
 import type { Snapshot } from './types';
 
+export const DEBOUNCE_MS = 350;
 export type Request = typeof fetch;
 export class Dashboard {
   state = $state<Snapshot | null>(null);
   optimistic = $state<number | null>(null);
   localPending = $state(false);
+  debouncing = $state(false);
   submitting = $state(false);
   streamConnected = $state(false);
+  streamReconnecting = $state(false);
   error = $state('');
   loggingOut = $state(false);
   logoutError = $state('');
   authGeneration = $state(0);
-  private edit = 0;
+  private edit = $state(0);
+  private acknowledgedCommandId: number | null = null;
   private ready: { target: number; edit: number } | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
@@ -19,6 +23,16 @@ export class Dashboard {
   private clientId = crypto.randomUUID();
   constructor(private request: Request = (...args) => fetch(...args)) {}
 
+  get adjustmentRevision() {
+    return this.edit;
+  }
+  get cloudAcknowledged() {
+    return (
+      this.state?.command != null &&
+      (this.state.command.server_accepted === true ||
+        this.state.command.id === this.acknowledgedCommandId)
+    );
+  }
   get canSetTarget() {
     return this.state?.can_set_target === true;
   }
@@ -63,12 +77,23 @@ export class Dashboard {
     } else if (this.state && next.revision <= this.state.revision) {
       return;
     }
+    if (
+      next.session !== this.state?.session ||
+      next.command?.id !== this.state?.command?.id
+    )
+      this.acknowledgedCommandId = null;
+    if (
+      next.command &&
+      ['accepted_by_cloud', 'awaiting_device'].includes(next.command.phase)
+    )
+      this.acknowledgedCommandId = next.command.id;
     this.state = next;
     if (!next.can_set_target) {
       clearTimeout(this.timer);
       this.ready = null;
       this.optimistic = null;
       this.localPending = false;
+      this.debouncing = false;
     }
   }
   useSession(next: Snapshot) {
@@ -77,6 +102,7 @@ export class Dashboard {
     this.state = null;
     this.optimistic = null;
     this.localPending = false;
+    this.debouncing = false;
     this.ready = null;
     clearTimeout(this.timer);
     this.accept(next);
@@ -86,6 +112,9 @@ export class Dashboard {
     this.state = null;
     this.optimistic = null;
     this.localPending = false;
+    this.debouncing = false;
+    this.ready = null;
+    clearTimeout(this.timer);
     void this.refresh();
   }
   async refresh() {
@@ -106,7 +135,7 @@ export class Dashboard {
     } catch {
       if (!this.disposed && generation === this.authGeneration)
         this.error =
-          'Cannot reach SmartThermWeb. Check the backend and try Refresh.';
+          'Cannot load readings. Check your connection and try again.';
     }
   }
   async logout() {
@@ -137,17 +166,20 @@ export class Dashboard {
   }
   change(delta: number) {
     if (!this.canSetTarget || this.target === null) return;
-    const target = Math.min(300, Math.max(50, this.target + delta));
+    const target = Math.min(350, Math.max(50, this.target + delta));
     this.optimistic = target;
     this.localPending = true;
+    this.debouncing = true;
     this.error = '';
     this.edit += 1;
+
     this.ready = null;
     clearTimeout(this.timer);
     this.timer = setTimeout(() => {
+      this.debouncing = false;
       this.ready = { target, edit: this.edit };
       void this.drain();
-    }, 350);
+    }, DEBOUNCE_MS);
   }
   retry() {
     if (this.target !== null) this.change(0);
@@ -158,6 +190,7 @@ export class Dashboard {
     const pending = this.ready;
     this.ready = null;
     this.submitting = true;
+
     try {
       const response = await this.request('/api/thermostat/target', {
         method: 'PUT',
@@ -169,6 +202,7 @@ export class Dashboard {
         }),
         signal: AbortSignal.timeout(8000),
       });
+
       if (!response.ok) {
         const data = await response.json();
         throw new Error(data.error?.message ?? 'Request rejected. Try again.');
@@ -199,6 +233,7 @@ export class Dashboard {
   }
   dispose() {
     this.disposed = true;
+    this.debouncing = false;
     clearTimeout(this.timer);
     this.ready = null;
   }

@@ -2,7 +2,7 @@
 
 Single Rust crate (Axum/Tokio) and Svelte 5 runes frontend in web/.
 
-- Keep temperatures as integer tenths; simulator target bounds are 50–300, step 5.
+- Keep temperatures as integer tenths; target bounds are 50–350 (matching the inspected Android control screen), step 5.
 - Cloud acceptance is not device confirmation. Preserve desired state across errors.
 - Only the controller worker calls the provider. Keep one pending target, coalescing newer requests.
 - Revisions reject stale events; server session IDs distinguish restarts.

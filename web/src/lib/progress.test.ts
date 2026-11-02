@@ -30,6 +30,7 @@ const input = (phase: Phase) => ({
   },
   target: 230,
   localPending: false,
+  debouncing: false,
   error: '',
   streamConnected: true,
 });
@@ -112,4 +113,23 @@ describe('checkpoint evidence', () => {
       commandProgress({ ...input('confirmed'), streamConnected: false }),
     ).toMatchObject({ checkpoint: 2, issue: true, retry: false });
   });
+});
+
+it('labels a matching OCSTAT target without claiming a device command acknowledgement', () => {
+  const source = input('target_matched');
+  source.state.provider = 'ocstat';
+  source.state.confirmed = {
+    ...state.confirmed!,
+    target_temperature: 230,
+    requested_temperature: 230,
+    matched_command: 1,
+  };
+  expect(commandProgress(source)).toMatchObject({
+    checkpoint: 3,
+    status: 'Target matches device',
+  });
+  source.state.confirmed.requested_temperature = 225;
+  expect(commandProgress(source).checkpoint).not.toBe(3);
+  source.state.command.phase = 'awaiting_device';
+  expect(commandProgress(source).checkpoint).toBe(2);
 });

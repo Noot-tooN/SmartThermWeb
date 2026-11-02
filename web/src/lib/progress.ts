@@ -8,11 +8,16 @@ export interface Progress {
   detail: string;
 }
 
-/** Milestones, not an estimate of elapsed time. Only device evidence fills the bar. */
+/** Milestones, not an estimate of elapsed time. Only device evidence establishes synchronization. */
 export function commandProgress(
   dashboard: Pick<
     Dashboard,
-    'state' | 'target' | 'localPending' | 'error' | 'streamConnected'
+    | 'state'
+    | 'target'
+    | 'localPending'
+    | 'debouncing'
+    | 'error'
+    | 'streamConnected'
   >,
 ): Progress {
   const command = dashboard.state?.command;
@@ -33,7 +38,9 @@ export function commandProgress(
     return result(
       1,
       'Updating',
-      'Combining your adjustments before sending the latest target.',
+      dashboard.debouncing
+        ? 'Combining your adjustments before sending the latest target.'
+        : 'Your latest adjustment is waiting to be accepted by SmartThermWeb.',
     );
   if (dashboard.error)
     return result(1, 'Delivery unverified', dashboard.error, true, true);
@@ -85,8 +92,23 @@ export function commandProgress(
     confirmed &&
     dashboard.state?.connectivity === 'online' &&
     confirmed.target_temperature === dashboard.target &&
-    (!command || phase === 'confirmed')
+    (!command || phase === 'confirmed' || phase === 'target_matched')
   ) {
+    if (dashboard.state?.provider === 'ocstat') {
+      if (confirmed.requested_temperature !== dashboard.target)
+        return result(
+          2,
+          'Waiting for device',
+          'The requested and reported targets do not yet match.',
+        );
+      return result(
+        3,
+        'Target matches device',
+        command
+          ? 'The requested and device-reported targets matched on two consecutive reads. Cloud readings may lag behind the thermostat.'
+          : 'The latest requested and device-reported targets match. Cloud readings may lag behind the thermostat.',
+      );
+    }
     return result(
       3,
       'Synced with device',

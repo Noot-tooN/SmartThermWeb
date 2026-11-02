@@ -66,23 +66,8 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 56px;
-}
-.brand {
-  display: flex;
-  align-items: center;
-  text-decoration: none;
-  color: var(--ink);
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: -0.7px;
-}
-.brand > span:last-child {
-  font-weight: 400;
-}
-.brand-mark {
-  font-size: 28px;
-  margin-right: 9px;
+  margin-bottom: 28px;
+  gap: 20px;
 }
 .demo-badge {
   white-space: nowrap;
@@ -92,42 +77,6 @@ header {
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 7px 10px;
-}
-.connection-row,
-.sync-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 12px;
-  gap: 16px;
-}
-.connection-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  align-items: start;
-  min-height: 2.8em;
-  line-height: 1.4;
-  margin: 0 4px 16px;
-}
-.connection-row > .muted {
-  justify-self: end;
-  width: 28ch;
-  max-width: 100%;
-}
-.connection {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-.connection i {
-  flex-shrink: 0;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #ad8356;
-}
-.connection.online i {
-  background: #4f8260;
 }
 .muted {
   color: var(--muted);
@@ -162,15 +111,14 @@ h1 {
 .mode {
   text-transform: capitalize;
   font-size: 11px;
-  background: var(--soft);
-  border-radius: 20px;
-  padding: 6px 10px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 .temperature-layout {
   display: grid;
   grid-template-columns: 1fr 1.5fr;
   align-items: center;
-  margin: 50px 0 40px;
+  margin: 28px 0;
   gap: 28px;
 }
 .label {
@@ -254,15 +202,11 @@ output span {
   text-decoration: underline;
   text-underline-offset: 3px;
 }
-.sync-row {
-  color: var(--muted);
-  margin: 8px 5px 30px;
-  font-size: 11px;
-}
 .simulator-panel {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 0 20px;
+  margin-top: 24px;
   background: transparent;
 }
 .simulator-panel summary {
@@ -323,15 +267,6 @@ select {
 .error {
   color: var(--warning);
 }
-footer {
-  font-size: 10px;
-  color: var(--muted);
-  text-align: center;
-  margin: 34px 0 8px;
-}
-footer span {
-  margin: 0 7px;
-}
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -376,9 +311,6 @@ footer span {
   }
   .room-heading h1 {
     font-size: 23px;
-  }
-  .connection-row {
-    font-size: 11px;
   }
   .timing-fields {
     grid-template-columns: 1fr;
@@ -425,14 +357,5 @@ footer span {
   }
   .thermostat {
     padding: 24px 18px;
-  }
-}
-
-/* Reserve both header rows on phones before account actions are known. */
-@media (max-width: 480px) {
-  header {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 8px;
   }
 }
