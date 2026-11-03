@@ -1,6 +1,6 @@
 # HTTP API
 
-Same origin, JSON. All temperatures are integer tenths of °C. Errors use `{"error":{"code":"...","message":"..."}}`. The local build is restricted to loopback. OCSTAT device data requires a browser session; the explicit simulator mode is unauthenticated.
+Same origin, JSON. All temperatures are integer tenths of °C. Errors use `{"error":{"code":"...","message":"..."}}`. The listener is restricted to loopback. Hosted mode accepts browser actions only from the exact HTTPS origin configured by `SMARTTHERM_PUBLIC_ORIGIN`, behind a same-machine reverse proxy; see [NixOS hosting](nixos.md). OCSTAT device data requires a browser session; the explicit simulator mode is unauthenticated.
 
 | Method | Path | Behavior |
 | --- | --- | --- |

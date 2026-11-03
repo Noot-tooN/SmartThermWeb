@@ -1,4 +1,5 @@
 use crate::{
+    browser_access::BrowserAccess,
     controller::{Controller, SubmitError},
     domain::{LoginState, TargetTemperature},
     provider::simulator::{Config, Simulator},
@@ -7,7 +8,7 @@ use crate::{
     },
 };
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode, Uri, header},
@@ -35,6 +36,13 @@ pub fn router(state: AppState) -> Router {
     router_with_schedule_trial(state, false)
 }
 pub fn router_with_schedule_trial(state: AppState, trial_enabled: bool) -> Router {
+    router_with_browser_access(state, trial_enabled, BrowserAccess::default())
+}
+pub fn router_with_browser_access(
+    state: AppState,
+    trial_enabled: bool,
+    access: BrowserAccess,
+) -> Router {
     let trial_routes = if trial_enabled {
         Router::new()
             .route("/schedule-trial", get(schedule_trial_page))
@@ -73,6 +81,7 @@ pub fn router_with_schedule_trial(state: AppState, trial_enabled: bool) -> Route
             get(simulator_config).put(configure_simulator),
         )
         .fallback(assets)
+        .layer(Extension(access))
         .with_state(state)
 }
 #[derive(Debug)]
@@ -129,7 +138,7 @@ impl IntoResponse for ApiError {
             Self::InvalidOrigin => (
                 StatusCode::FORBIDDEN,
                 "invalid_origin",
-                "Use the local SmartThermWeb page for account actions.".into(),
+                "Use the configured SmartThermWeb address for this action.".into(),
             ),
             Self::InvalidLogin => (
                 StatusCode::BAD_REQUEST,
@@ -184,29 +193,13 @@ struct LoginRequest {
     email: String,
     password: String,
 }
-fn local_same_origin(headers: &HeaderMap) -> bool {
-    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
-        return false;
-    };
-    let Some(origin) = headers
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<Uri>().ok())
-    else {
-        return false;
-    };
-    matches!(origin.scheme_str(), Some("http" | "https"))
-        && origin.authority().is_some_and(|a| a.as_str() == host)
-        && origin.path() == "/"
-        && origin.query().is_none()
-        && matches!(origin.host(), Some("127.0.0.1" | "localhost" | "[::1]"))
-}
 async fn login(
+    Extension(access): Extension<BrowserAccess>,
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<LoginRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if !local_same_origin(&headers) {
+    if !access.allows(&headers) {
         return Err(ApiError::InvalidOrigin);
     }
     // Never echo JSON extractor errors: they can include user-supplied values.
@@ -252,16 +245,20 @@ async fn login(
         StatusCode::OK,
         [
             (header::CACHE_CONTROL, "no-store".to_owned()),
-            (header::SET_COOKIE, session_cookie(&token)),
+            (
+                header::SET_COOKIE,
+                session_cookie(&token, access.secure_cookie()),
+            ),
         ],
         Json(snapshot),
     ))
 }
 async fn logout(
+    Extension(access): Extension<BrowserAccess>,
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    if !local_same_origin(&headers) {
+    if !access.allows(&headers) {
         return Err(ApiError::InvalidOrigin);
     }
     let sessions = state.sessions.as_ref().ok_or(ApiError::LogoutUnavailable)?;
@@ -270,8 +267,8 @@ async fn logout(
     }
     Ok((
         [
-            (header::CACHE_CONTROL, "no-store"),
-            (header::SET_COOKIE, clear_cookie()),
+            (header::CACHE_CONTROL, "no-store".to_owned()),
+            (header::SET_COOKIE, clear_cookie(access.secure_cookie())),
         ],
         Json(state.controller.snapshot()),
     ))
@@ -319,12 +316,13 @@ struct TargetRequest {
     client_revision: Option<u64>,
 }
 async fn set_target(
+    Extension(access): Extension<BrowserAccess>,
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<TargetRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let controller = if state.sessions.is_some() {
-        if !local_same_origin(&headers) {
+        if !access.allows(&headers) {
             return Err(ApiError::InvalidOrigin);
         }
         browser_session(&state, &headers)
@@ -385,10 +383,11 @@ async fn read_schedule(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(preview)))
 }
 async fn recover_schedule(
+    Extension(access): Extension<BrowserAccess>,
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    if !local_same_origin(&headers) {
+    if !access.allows(&headers) {
         return Err(ApiError::InvalidOrigin);
     }
     let session = browser_session(&state, &headers).ok_or(ApiError::Unauthenticated)?;
@@ -407,11 +406,12 @@ async fn recover_schedule(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(preview)))
 }
 async fn save_schedule(
+    Extension(access): Extension<BrowserAccess>,
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<crate::schedule::SaveRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if !local_same_origin(&headers) {
+    if !access.allows(&headers) {
         return Err(ApiError::InvalidOrigin);
     }
     let session = browser_session(&state, &headers).ok_or(ApiError::Unauthenticated)?;
@@ -442,12 +442,13 @@ async fn save_schedule(
 }
 // Pure calculation: this route never invokes a provider or persists a schedule.
 async fn preview_schedule(
+    Extension(access): Extension<BrowserAccess>,
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<crate::schedule::Schedule>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     if state.sessions.is_some() {
-        if !local_same_origin(&headers) {
+        if !access.allows(&headers) {
             return Err(ApiError::InvalidOrigin);
         }
         let session = browser_session(&state, &headers).ok_or(ApiError::Unauthenticated)?;
@@ -596,11 +597,12 @@ async fn schedule_trial_page() -> impl IntoResponse {
     )
 }
 async fn schedule_trial(
+    Extension(access): Extension<BrowserAccess>,
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<crate::provider::ocstat::trial::Action>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if !local_same_origin(&headers) {
+    if !access.allows(&headers) {
         return Err(ApiError::InvalidOrigin);
     }
     let session = browser_session(&state, &headers).ok_or(ApiError::Unauthenticated)?;

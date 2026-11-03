@@ -1076,3 +1076,103 @@ async fn schedule_recovery_is_authenticated_same_origin_and_read_only() {
     assert_eq!(before["desired"], after["desired"]);
     assert_eq!(before["command"], after["command"]);
 }
+
+#[tokio::test(start_paused = true)]
+async fn hosted_https_login_cookie_writes_and_logout_use_explicit_origin() {
+    use smartthermweb::{api::router_with_browser_access, browser_access::BrowserAccess};
+    let app = router_with_browser_access(
+        AppState {
+            controller: Controller::ocstat_read_only(),
+            simulator: None,
+            sessions: Some(Arc::new(smartthermweb::sessions::Sessions::with_factory(
+                Arc::new(|| Ok(Arc::new(FakeAccount::default()))),
+            ))),
+        },
+        false,
+        BrowserAccess::https("https://heating.example.test").unwrap(),
+    );
+    let response = app
+        .clone()
+        .oneshot(login_request(
+            r#"{"email":"test@example.invalid","password":"TEST_PASSWORD_ONLY"}"#,
+            "heating.example.test",
+            "https://heating.example.test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(cookie.contains("; Secure"));
+    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+    assert!(!cookie.contains("Domain="));
+    let cookie = cookie.split(';').next().unwrap();
+    for (method, path) in [
+        ("PUT", "/api/thermostat/target"),
+        ("PUT", "/api/thermostat/schedule"),
+        ("POST", "/api/thermostat/schedule/preview"),
+        ("POST", "/api/thermostat/schedule/recover"),
+        ("POST", "/api/logout"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("host", "heating.example.test")
+                    .header("origin", "https://evil.example.test")
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/thermostat/target")
+                .header("host", "heating.example.test")
+                .header("origin", "https://heating.example.test")
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"target_temperature":220}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/logout")
+                .header("host", "heating.example.test")
+                .header("origin", "https://heating.example.test")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0; Secure")
+    );
+    let response = app
+        .oneshot(get_with_cookie("/api/thermostat", cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

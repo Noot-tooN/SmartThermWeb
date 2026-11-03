@@ -1,4 +1,5 @@
 pub mod api;
+pub mod browser_access;
 pub mod controller;
 pub mod domain;
 pub mod provider;

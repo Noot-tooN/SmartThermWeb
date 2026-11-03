@@ -1,6 +1,6 @@
 use smartthermweb::sessions::Sessions;
 use smartthermweb::{
-    api::{AppState, router_with_schedule_trial},
+    api::{AppState, router_with_browser_access},
     controller::{Controller, Timing},
     provider::{
         Provider,
@@ -16,7 +16,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
         .parse()?;
     if !address.ip().is_loopback() {
-        return Err("This local build must bind to a loopback address.".into());
+        return Err("Bind to loopback and use an HTTPS reverse proxy for remote access.".into());
+    }
+    let access = std::env::var("SMARTTHERM_PUBLIC_ORIGIN")
+        .ok()
+        .map(|origin| smartthermweb::browser_access::BrowserAccess::https(&origin))
+        .transpose()?
+        .unwrap_or_default();
+    if access.secure_cookie() && provider_name != "ocstat" {
+        return Err("Hosted mode requires the authenticated OCSTAT provider.".into());
     }
     let trial = std::env::var_os("SMARTTHERM_SCHEDULE_TRIAL_DIR")
         .map(|directory| {
@@ -69,16 +77,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     axum::serve(
         listener,
-        router_with_schedule_trial(
+        router_with_browser_access(
             AppState {
                 controller,
                 simulator,
                 sessions,
             },
             trial_enabled,
+            access,
         ),
     )
     .with_graceful_shutdown(async {
+        #[cfg(unix)]
+        {
+            let mut terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+        }
+        #[cfg(not(unix))]
         let _ = tokio::signal::ctrl_c().await;
     })
     .await?;
