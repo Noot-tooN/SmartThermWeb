@@ -530,6 +530,9 @@ impl Provider for Ocstat {
     fn read_schedule_preview(&self) -> ProviderFuture<'_, crate::schedule::Preview> {
         Box::pin(self.schedule_snapshot())
     }
+    fn recover_schedule(&self) -> ProviderFuture<'_, crate::schedule::Preview> {
+        Box::pin(self.adopt_server_schedule())
+    }
     fn save_schedule(
         &self,
         request: crate::schedule::SaveRequest,

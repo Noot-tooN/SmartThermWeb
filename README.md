@@ -200,8 +200,10 @@ serially over HTTPS, and requires exact slot readback. A conflict or uncertain
 outcome stops remaining groups. There is no automatic retry or rollback.
 
 The editor retains its draft after failures. **Check server** reads only; a full
-match clears the draft as **Accepted by server**. Otherwise, **Reload and discard
-edits** explicitly loads the current server schedule. Partial acceptance names
+match clears the draft as **Accepted by server**. Otherwise, **Use server schedule** explicitly discards the draft and adopts a fresh
+server read, clearing the unresolved local save. It sends no thermostat commands
+and does not cancel an update that might still arrive. Failed recovery reads
+leave the draft and pending lock intact. Partial acceptance names
 the groups already verified. Normal pending-write tracking survives canceled
 requests and browser logout within the running server, but is memory-only; server
 restarts never resume writes. After a restart, inspect the freshly loaded schedule

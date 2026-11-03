@@ -860,7 +860,7 @@ it('keeps a conflicting draft and requires an explicit discard before loading a 
     screen.getByRole('button', { name: '07:00 to 23:30, 22.0 degrees' }),
   ).toBeTruthy();
   await fireEvent.click(
-    screen.getByRole('button', { name: 'Reload and discard edits' }),
+    screen.getByRole('button', { name: 'Use server schedule' }),
   );
   await vi.advanceTimersByTimeAsync(0);
   expect(
@@ -920,4 +920,80 @@ it('allows time and grouping edits and submits the full desired schedule with it
       ?.querySelector('.mode-marker.is-current'),
   ).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Check server' })).toBeTruthy();
+});
+
+it('adopts the server schedule only on explicit recovery and unlocks subsequent edits without a PUT', async () => {
+  const pending = { ...savablePreview(), can_save: false, save_pending: true };
+  const fetch = vi
+    .fn()
+    .mockImplementation((url: string) =>
+      Promise.resolve(
+        ok(url.endsWith('/recover') ? savablePreview() : pending),
+      ),
+    );
+  vi.stubGlobal('fetch', fetch);
+  render(Schedule, { live: true });
+  await vi.advanceTimersByTimeAsync(0);
+  await fireEvent.click(screen.getByRole('radio', { name: 'Every day' }));
+  await vi.advanceTimersByTimeAsync(300);
+  await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByText(/Save still unverified/)).toBeTruthy();
+  expect(fetch.mock.calls.some(([url]) => url.endsWith('/recover'))).toBe(
+    false,
+  );
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Use server schedule' }),
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(
+    fetch.mock.calls.filter(
+      ([url, options]) => url.endsWith('/recover') && options.method === 'POST',
+    ),
+  ).toHaveLength(1);
+  expect(
+    fetch.mock.calls.some(([, options]) => options?.method === 'PUT'),
+  ).toBe(false);
+  expect(screen.queryByText('Accepted by server')).toBeNull();
+  expect(screen.getByText(/Using the server schedule/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Check server' })).toBeNull();
+  await editWeekdayTemperature();
+  expect(
+    (screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+});
+it('keeps the draft and recovery actions when the recovery read fails', async () => {
+  const fetch = vi
+    .fn()
+    .mockImplementation((url: string) =>
+      Promise.resolve(
+        url.endsWith('/recover')
+          ? { ok: false, status: 502 }
+          : ok({ ...savablePreview(), can_save: false, save_pending: true }),
+      ),
+    );
+  vi.stubGlobal('fetch', fetch);
+  render(Schedule, { live: true });
+  await vi.advanceTimersByTimeAsync(0);
+  await fireEvent.click(screen.getByRole('radio', { name: 'Every day' }));
+  await vi.advanceTimersByTimeAsync(300);
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Use server schedule' }),
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(
+    (screen.getByRole('radio', { name: 'Every day' }) as HTMLInputElement)
+      .checked,
+  ).toBe(true);
+  expect(
+    screen.getByText(/Your draft and unresolved save are kept/),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole('button', { name: 'Use server schedule' }),
+  ).toBeTruthy();
+  expect(
+    (screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
 });

@@ -186,3 +186,9 @@ readback reconciles the former, while the latter requires all six target slots.
 No remaining groups are resumed by GET after a timeout; it only observes state.
 The browser retains its desired draft and marks the currently observed grouping,
 including when the grouping changed but some/all period writes remain unverified.
+
+### Recovering an unresolved schedule save
+
+`POST /api/thermostat/schedule/recover` requires the same signed-in, same-origin browser session as Save. It performs a complete fresh schedule read under the shared schedule gate, validates the preview, and only then clears that account/device's local pending journal entry. It returns the adopted `Preview` with `Cache-Control: no-store`. No manufacturer write, retry, rollback, or cancellation is sent. A failed/cancelled read retains the journal. Other accounts/devices are untouched. GET remains observational and never abandons an unresolved attempt.
+
+The UI's **Use server schedule** explicitly discards the local draft and adopts this snapshot, without reporting acceptance of the earlier save. A delayed cloud update may still arrive; later saves still compare their baseline against a fresh read.

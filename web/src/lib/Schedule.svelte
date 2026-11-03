@@ -158,24 +158,35 @@
   let loadRequest: AbortController | null = null;
   async function loadSchedule(discardEdits = false) {
     if (loading || saving || (loaded && dirty && !discardEdits)) return;
+    const recover = discardEdits && needsCheck;
     loading = true;
     loadError = '';
     const controller = new AbortController();
     loadRequest = controller;
     try {
-      const response = await fetch('/api/thermostat/schedule', {
-        signal: AbortSignal.any([
-          controller.signal,
-          AbortSignal.timeout(45000),
-        ]),
-      });
+      const response = await fetch(
+        recover
+          ? '/api/thermostat/schedule/recover'
+          : '/api/thermostat/schedule',
+        {
+          ...(recover ? { method: 'POST' } : {}),
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(45000),
+          ]),
+        },
+      );
       if (controller.signal.aborted) return;
       if (response.status === 401) {
         onExpired();
         return;
       }
       if (!response.ok)
-        throw new Error('Could not load the schedule. Try again.');
+        throw new Error(
+          recover
+            ? 'Could not read the server schedule. Your draft and unresolved save are kept.'
+            : 'Could not load the schedule. Try again.',
+        );
       const preview = await response.json();
       if (controller.signal.aborted) return;
       const draft = draftFromPreview(preview);
@@ -184,7 +195,9 @@
       saveBlocked = needsCheck = !!preview.save_pending;
       saveMessage = preview.save_pending
         ? 'A previous save is still unverified. Check the server before continuing.'
-        : '';
+        : recover
+          ? 'Using the server schedule. Nothing was resent; a delayed update could still arrive.'
+          : '';
       generation++;
       clearTimeout(timer);
       request?.abort();
@@ -1113,8 +1126,8 @@
                 <button
                   class="quiet"
                   disabled={saving || loading}
-                  onclick={() => loadSchedule(true)}
-                  >Reload and discard edits</button
+                  title="Discard your draft and forget the unresolved save after a fresh server read. This does not cancel a delayed cloud update."
+                  onclick={() => loadSchedule(true)}>Use server schedule</button
                 >
               </div>
             {/if}
@@ -1153,18 +1166,20 @@
 
   .schedule-panel {
     position: relative;
-    margin-top: 18px;
+    margin-top: 24px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 20px;
+    border-radius: 16px;
   }
   h2 {
     margin: 0;
-    font-size: 16px;
+    font-size: 20px;
     font-weight: 500;
   }
   .schedule-heading {
-    padding: 22px 30px;
+    padding: 20px 32px 16px;
+    margin: 0;
+    min-height: 76px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -1174,7 +1189,7 @@
   .schedule-heading h2 {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 12px;
   }
   .reload-schedule {
     display: flex;
@@ -1207,7 +1222,7 @@
     font-weight: 400;
   }
   #schedule-content {
-    padding: 0 30px 18px;
+    padding: 0 32px 16px;
   }
   .schedule-placeholder {
     position: relative;
@@ -1343,7 +1358,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 9px 10px;
+    padding: 8px 12px;
     border-radius: 8px;
     font-size: 12px;
     line-height: 1.3;
@@ -1354,8 +1369,8 @@
   }
   .mode-marker {
     visibility: hidden;
-    font-size: 9px;
-    line-height: 11px;
+    font-size: 10px;
+    line-height: 12px;
     color: var(--accent);
   }
   .mode-marker.is-current {
@@ -1365,7 +1380,7 @@
     background: var(--surface);
     color: var(--ink);
     border-color: var(--border);
-    box-shadow: 0 1px 3px #0001;
+    box-shadow: none;
   }
   .pattern-choice input:focus-visible + span {
     outline: 3px solid #b98030;
@@ -1380,7 +1395,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--accent);
+    color: var(--muted);
     cursor: pointer;
     min-height: 44px;
     font-size: 12px;
@@ -1490,7 +1505,7 @@
   }
   .row-heading h3 {
     margin: 0;
-    font-size: 12px;
+    font-size: 14px;
     font-weight: 500;
   }
   .draft-actions {
@@ -1519,8 +1534,10 @@
     gap: 6px;
   }
   .save {
-    padding: 8px 16px;
-    background: var(--soft);
+    padding: 8px 20px;
+    background: var(--accent);
+    color: var(--surface);
+    border-color: transparent;
   }
   .save-area small {
     font-size: 10px;
@@ -1529,7 +1546,7 @@
   .schedule-editor {
     position: relative;
     display: flow-root;
-    margin-top: 12px;
+    margin-top: 20px;
   }
   .timeline-scale {
     position: absolute;
@@ -1556,7 +1573,7 @@
   }
   .timeline {
     position: relative;
-    height: 64px;
+    height: 72px;
     touch-action: pan-y;
     user-select: none;
     border-radius: 10px;
@@ -1820,13 +1837,13 @@
     }
 
     .schedule-heading {
-      padding: 20px;
+      padding: 16px 20px;
     }
     #schedule-content {
-      padding: 0 20px 14px;
+      padding: 0 20px 12px;
     }
     .timeline {
-      height: 64px;
+      height: 72px;
     }
     .block {
       font-size: 15px;

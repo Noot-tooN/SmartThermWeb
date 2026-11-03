@@ -451,6 +451,11 @@ impl smartthermweb::provider::Provider for FakeAccount {
             })
         })
     }
+    fn recover_schedule(
+        &self,
+    ) -> smartthermweb::provider::ProviderFuture<'_, smartthermweb::schedule::Preview> {
+        self.read_schedule_preview()
+    }
     fn read_schedule(
         &self,
     ) -> smartthermweb::provider::ProviderFuture<'_, smartthermweb::schedule::Schedule> {
@@ -1015,4 +1020,59 @@ async fn schedule_save_requires_auth_origin_and_valid_baseline_and_does_not_enab
         .await
         .unwrap();
     assert_ne!(response.status(), StatusCode::OK); // Default providers remain read-only.
+}
+
+#[tokio::test(start_paused = true)]
+async fn schedule_recovery_is_authenticated_same_origin_and_read_only() {
+    let app = cloud_app();
+    let request = |cookie: &str, origin: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/thermostat/schedule/recover")
+            .header("host", "localhost:3000")
+            .header("origin", origin)
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(request("", "http://localhost:3000"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let cookie = sign_in(&app, "one@example.test").await;
+    assert_eq!(
+        app.clone()
+            .oneshot(request(&cookie, "https://other.example"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let before = json(
+        app.clone()
+            .oneshot(get_with_cookie("/api/thermostat", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let recovered = app
+        .clone()
+        .oneshot(request(&cookie, "http://localhost:3000"))
+        .await
+        .unwrap();
+    assert_eq!(recovered.status(), StatusCode::OK);
+    assert_eq!(recovered.headers()["cache-control"], "no-store");
+    assert_eq!(json(recovered).await["save_pending"], false);
+    let after = json(
+        app.oneshot(get_with_cookie("/api/thermostat", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(before["desired"], after["desired"]);
+    assert_eq!(before["command"], after["command"]);
 }

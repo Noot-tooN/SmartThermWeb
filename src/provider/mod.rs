@@ -54,6 +54,11 @@ pub trait Provider: Send + Sync {
                 .map_err(|_| ProviderError::InvalidResponse)
         })
     }
+    /// Explicitly adopt a fresh server read and forget an unresolved local save.
+    /// Never writes to the manufacturer or claims cancellation/application.
+    fn recover_schedule(&self) -> ProviderFuture<'_, crate::schedule::Preview> {
+        Box::pin(async { Err(ProviderError::ReadOnly) })
+    }
     fn save_schedule(
         &self,
         _request: crate::schedule::SaveRequest,

@@ -109,6 +109,18 @@ fn result(
     }
 }
 impl Ocstat {
+    pub(super) async fn adopt_server_schedule(&self) -> Result<Preview, ProviderError> {
+        // Keep the same cross-session lock as save/read. A failed or cancelled
+        // fresh read must leave the unresolved attempt intact. This only clears
+        // our local journal; an already-dispatched cloud command can still arrive.
+        let mut gate = SCHEDULE_GATE.lock().await;
+        let mut auth = self.auth.lock().await;
+        let raw = self.read_raw_schedule(&mut auth).await?;
+        let key = identity(&auth)?;
+        let current = preview(&raw, false)?;
+        gate.pending.remove(&key);
+        Ok(current)
+    }
     pub(super) async fn schedule_snapshot(&self) -> Result<Preview, ProviderError> {
         let mut gate = SCHEDULE_GATE.lock().await;
         let mut auth = self.auth.lock().await;
@@ -166,7 +178,7 @@ impl Ocstat {
                     return Ok(result(
                         SaveStatus::Unverified,
                         vec![],
-                        "Could not verify the grouping change. No periods were sent. Check the server before continuing.",
+                        "The grouping may already be active, but its stored schedule could not be read. Your new periods were not sent. Check the server before continuing.",
                         None,
                     ));
                 }

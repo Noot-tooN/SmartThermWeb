@@ -956,4 +956,87 @@ mod tests {
         assert!(response.accepted_groups.is_empty());
         assert_eq!(f.fake.writes.lock().unwrap().len(), 2);
     }
+    #[tokio::test]
+    async fn explicit_recovery_unlocks_mode_and_group_attempts_without_resending() {
+        use crate::schedule::{Group, Pattern, SaveStatus};
+        for mode_change in [false, true] {
+            let f = save_fixture().await;
+            let mut request = save_request();
+            if mode_change {
+                request.schedule.pattern = Pattern::Daily;
+                request.schedule.groups.truncate(1);
+                request.schedule.groups[0].group = Group::EveryDay;
+            }
+            *f.fake.behavior.lock().unwrap() = WriteBehavior::NoChange;
+            assert_eq!(
+                f.provider
+                    .save_schedule(request.clone())
+                    .await
+                    .unwrap()
+                    .status,
+                SaveStatus::Unverified
+            );
+            assert!(
+                f.provider
+                    .read_schedule_preview()
+                    .await
+                    .unwrap()
+                    .save_pending
+            );
+            let original = f.fake.raw.lock().unwrap().clone();
+            let recovered = f.provider.recover_schedule().await.unwrap();
+            assert_eq!(recovered.schedule, original.clean().unwrap());
+            assert!(!recovered.save_pending);
+            assert!(recovered.can_save);
+            assert_eq!(*f.fake.raw.lock().unwrap(), original);
+            assert_eq!(f.fake.writes.lock().unwrap().len(), 1);
+            // Editing is available again, but only a separate explicit Save writes.
+            *f.fake.behavior.lock().unwrap() = WriteBehavior::Normal;
+            assert_eq!(
+                f.provider.save_schedule(request).await.unwrap().status,
+                SaveStatus::Accepted
+            );
+        }
+    }
+    #[tokio::test]
+    async fn recovery_requires_a_complete_read_and_is_scoped_to_the_account_device() {
+        let f = save_fixture().await;
+        let other = save_fixture().await;
+        for fixture in [&f, &other] {
+            *fixture.fake.behavior.lock().unwrap() = WriteBehavior::NoChange;
+            fixture
+                .provider
+                .save_schedule(save_request())
+                .await
+                .unwrap();
+        }
+        *f.fake.behavior.lock().unwrap() = WriteBehavior::ReadbackFails;
+        assert!(f.provider.recover_schedule().await.is_err());
+        *f.fake.behavior.lock().unwrap() = WriteBehavior::Normal;
+        assert!(
+            f.provider
+                .read_schedule_preview()
+                .await
+                .unwrap()
+                .save_pending
+        );
+        f.provider.recover_schedule().await.unwrap();
+        assert!(
+            !f.provider
+                .read_schedule_preview()
+                .await
+                .unwrap()
+                .save_pending
+        );
+        assert!(
+            other
+                .provider
+                .read_schedule_preview()
+                .await
+                .unwrap()
+                .save_pending
+        );
+        assert_eq!(f.fake.writes.lock().unwrap().len(), 1);
+        assert_eq!(other.fake.writes.lock().unwrap().len(), 1);
+    }
 }

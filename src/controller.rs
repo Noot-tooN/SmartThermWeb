@@ -15,6 +15,7 @@ use tokio::{
 use crate::provider::ocstat::trial::{Action as TrialAction, Status as TrialStatus};
 enum ScheduleJob {
     Read(ScheduleReply),
+    Recover(ScheduleReply),
     Save(
         crate::schedule::SaveRequest,
         oneshot::Sender<Result<crate::schedule::SaveResult, ProviderError>>,
@@ -27,7 +28,7 @@ enum ScheduleJob {
 impl ScheduleJob {
     fn reject(self) {
         match self {
-            Self::Read(reply) => {
+            Self::Read(reply) | Self::Recover(reply) => {
                 let _ = reply.send(Err(ProviderError::LoginRequired));
             }
             Self::Save(_, reply) => {
@@ -154,6 +155,22 @@ impl Controller {
         self.wake.notify_one();
         receiver.await.unwrap_or(Err(ProviderError::LoginRequired))
     }
+    pub async fn recover_schedule(&self) -> Result<crate::schedule::Preview, ProviderError> {
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut core = self.core.lock().unwrap();
+            if core.state.login != Some(LoginState::Ready) || core.pending_logout {
+                return Err(ProviderError::LoginRequired);
+            }
+            if core.schedule_loading {
+                return Err(ProviderError::Transport);
+            }
+            core.schedule_loading = true;
+            core.pending_schedule = Some(ScheduleJob::Recover(sender));
+        }
+        self.wake.notify_one();
+        receiver.await.unwrap_or(Err(ProviderError::LoginRequired))
+    }
     pub async fn schedule_trial(&self, action: TrialAction) -> Result<TrialStatus, ProviderError> {
         let (sender, receiver) = oneshot::channel();
         {
@@ -216,6 +233,16 @@ impl Controller {
                     Err(ProviderError::Transport)
                 } else {
                     timeout(timing.request, provider.read_schedule_preview())
+                        .await
+                        .unwrap_or(Err(ProviderError::Transport))
+                };
+                self.finish_schedule(reply, result);
+            }
+            ScheduleJob::Recover(reply) => {
+                let result = if reply.is_closed() {
+                    Err(ProviderError::Transport)
+                } else {
+                    timeout(timing.request, provider.recover_schedule())
                         .await
                         .unwrap_or(Err(ProviderError::Transport))
                 };

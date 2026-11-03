@@ -14,3 +14,8 @@ Single Rust crate (Axum/Tokio) and Svelte 5 runes frontend in web/.
 - Keep dependencies small. Schedules are now in scope: keep the browser model independent of OCSTAT encoding; gate live schedule writes until verified and explicitly approved. No database, new auth system, Nix, or extra infrastructure.
 - Preserve the Apache 2.0 license.
 - CodeGraph is not initialized here. Ask before creating an index; use native tools until then.
+
+## Frontend design
+
+- For visual UI changes, use the project-local `.agents/skills/unslop/SKILL.md` and read `DESIGN.md` first.
+- Product requirements in `DESIGN.md` override generic visual rules: preserve useful debounce/status motion, stable loading geometry, accessible controls, and the timeline editor.

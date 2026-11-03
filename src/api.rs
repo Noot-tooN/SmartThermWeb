@@ -61,6 +61,7 @@ pub fn router_with_schedule_trial(state: AppState, trial_enabled: bool) -> Route
                 .put(save_schedule)
                 .layer(DefaultBodyLimit::max(16_384)),
         )
+        .route("/api/thermostat/schedule/recover", post(recover_schedule))
         .route(
             "/api/thermostat/schedule/preview",
             post(preview_schedule).layer(DefaultBodyLimit::max(16_384)),
@@ -381,6 +382,28 @@ async fn read_schedule(
         _ => ApiError::CloudUnavailable,
     })?;
     let preview = schedule;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(preview)))
+}
+async fn recover_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    if !local_same_origin(&headers) {
+        return Err(ApiError::InvalidOrigin);
+    }
+    let session = browser_session(&state, &headers).ok_or(ApiError::Unauthenticated)?;
+    let preview = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        session.controller.recover_schedule(),
+    )
+    .await
+    .map_err(|_| ApiError::CloudUnavailable)?
+    .map_err(|e| match e {
+        crate::provider::ProviderError::LoginRequired
+        | crate::provider::ProviderError::Authentication => ApiError::Unauthenticated,
+        crate::provider::ProviderError::ReadOnly => ApiError::ReadOnly,
+        _ => ApiError::CloudUnavailable,
+    })?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(preview)))
 }
 async fn save_schedule(

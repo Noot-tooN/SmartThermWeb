@@ -64,8 +64,12 @@ fn decode(frame: &[u8], device: &str, mode: u8) -> Result<[(u8, Slots); 2], Prov
     }
     let first = hex(&frame[17..18])? as u8;
     let next = hex(&frame[18..19])? as u8;
-    let expected = days(mode)?;
-    if !expected.contains(&first) || !expected.contains(&next) {
+    // Android stores all ten groups in one bank. A reply pairs a requested
+    // group with a companion even when that companion belongs to another mode
+    // (observed daily reply: day 10 + day 1). Validate both, then the caller
+    // retains only groups required by the active mode.
+    days(mode)?;
+    if !(1..=10).contains(&first) || !(1..=10).contains(&next) {
         return Err(invalid());
     }
     let mut rows = [[0; 2]; 12];
@@ -201,6 +205,9 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             continue;
         }
         for (day, rows) in decode(&frame, device, mode)? {
+            if !required.contains(&day) {
+                continue;
+            }
             if let Some(previous) = slots.insert(day, rows)
                 && previous != rows
             {
@@ -333,5 +340,111 @@ mod tests {
         assert_ne!(a, b);
         assert!(registration(10_000_000, "0123456789abcdef0123456789abcdef").is_err());
         assert!(registration(7, "not a token").is_err());
+    }
+    fn paired_frame(mode: u8, first: u8, next: u8, rows: [Slots; 2]) -> Vec<u8> {
+        let mut text = format!("##62P(ESTDEVICE01{first:x}{next:x}6{mode:x}");
+        for group in rows {
+            for row in group {
+                text.push_str(&format!("{:02x}", row[1] / 5));
+            }
+        }
+        for group in rows {
+            for row in group {
+                text.push_str(&format!("{:02x}{:02x}", row[0] / 60, row[0] % 60));
+            }
+        }
+        text.push_str("20000");
+        text.into_bytes()
+    }
+    #[tokio::test(start_paused = true)]
+    async fn daily_read_accepts_monday_companion_but_never_imports_it_into_daily_bank() {
+        // Sanitized observed day-10/day-1 reply shape. Identity is synthetic.
+        let daily = [
+            [360, 200],
+            [480, 150],
+            [720, 150],
+            [840, 150],
+            [1020, 210],
+            [1320, 150],
+        ];
+        let monday = [
+            [360, 200],
+            [3360, 150],
+            [3600, 150],
+            [3720, 150],
+            [3900, 210],
+            [4200, 150],
+        ];
+        let frame = paired_frame(2, 10, 1, [daily, monday]);
+        let (mut client, mut server) = tokio::io::duplex(256);
+        let registration = registration(7, "0123456789abcdef0123456789abcdef").unwrap();
+        let serve = async {
+            let mut outbound = [0; 77];
+            server.read_exact(&mut outbound).await.unwrap();
+            assert_eq!(&outbound[59..], b"&&122(ESTDEVICE01a");
+            server.write_all(&frame).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            exchange(&mut client, &registration, "(ESTDEVICE01", 2, &[10]),
+            serve
+        );
+        let raw = result.unwrap();
+        assert_eq!(raw.slots, BTreeMap::from([(10, daily)]));
+        let schedule = raw.clean().unwrap();
+        assert_eq!(schedule.pattern, Pattern::Daily);
+        assert_eq!(schedule.groups.len(), 1);
+        assert_eq!(
+            schedule.groups[0].changes[1].target_temperature,
+            150.try_into().unwrap()
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn weekly_read_ignores_companion_weekday_group_and_still_requires_all_seven_days() {
+        let rows = [
+            [360, 200],
+            [480, 150],
+            [720, 150],
+            [840, 150],
+            [1020, 210],
+            [1320, 150],
+        ];
+        let required = days(0).unwrap();
+        let (mut client, mut server) = tokio::io::duplex(512);
+        let registration = registration(7, "0123456789abcdef0123456789abcdef").unwrap();
+        let serve = async {
+            let mut outbound = [0; 59 + 18 * 7];
+            server.read_exact(&mut outbound).await.unwrap();
+            for day in [1, 3, 5, 7] {
+                server
+                    .write_all(&paired_frame(0, day, day + 1, [rows, rows]))
+                    .await
+                    .unwrap();
+            }
+        };
+        let (result, ()) = tokio::join!(
+            exchange(&mut client, &registration, "(ESTDEVICE01", 0, &required),
+            serve
+        );
+        let raw = result.unwrap();
+        assert_eq!(raw.slots.keys().copied().collect::<Vec<_>>(), required);
+        assert_eq!(raw.clean().unwrap().groups.len(), 7);
+    }
+    #[test]
+    fn companion_groups_still_require_valid_identifiers_slots_and_matching_mode() {
+        let rows = [
+            [360, 200],
+            [480, 150],
+            [720, 150],
+            [840, 150],
+            [1020, 210],
+            [1320, 150],
+        ];
+        for next in [0, 11, 15] {
+            assert!(decode(&paired_frame(2, 10, next, [rows, rows]), "(ESTDEVICE01", 2).is_err());
+        }
+        let mut bad = rows;
+        bad[0][1] = 0;
+        assert!(decode(&paired_frame(2, 10, 1, [rows, bad]), "(ESTDEVICE01", 2).is_err());
+        assert!(decode(&paired_frame(1, 10, 1, [rows, rows]), "(ESTDEVICE01", 2).is_err());
     }
 }

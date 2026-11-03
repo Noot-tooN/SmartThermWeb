@@ -5,16 +5,16 @@
     BlinkMacSystemFont,
     'Segoe UI',
     sans-serif;
-  color: #26372f;
-  background: #f4f3ed;
+  color: #242925;
+  background: #f5f6f3;
   font-synthesis: none;
   color-scheme: light dark;
-  --surface: #fffefa;
-  --ink: #26372f;
-  --muted: #64736b;
-  --border: #dce2d9;
-  --accent: #296348;
-  --soft: #eaf1e7;
+  --surface: #ffffff;
+  --ink: #242925;
+  --muted: #626b65;
+  --border: #dfe3df;
+  --accent: #356248;
+  --soft: #eef1ed;
   --warning: #82541c;
   --warning-bg: #fff2dc;
 }
@@ -57,16 +57,16 @@ summary:focus-visible {
 }
 main {
   position: relative;
-  max-width: 800px;
+  max-width: 960px;
   margin: 0 auto;
-  padding: 36px 24px;
+  padding: 24px 32px;
 }
-header {
+main > header {
   min-height: 44px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 28px;
+  margin-bottom: 16px;
   gap: 20px;
 }
 .demo-badge {
@@ -82,16 +82,15 @@ header {
   color: var(--muted);
 }
 .thermostat {
-  padding: 36px;
+  padding: 28px 32px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 20px;
-  box-shadow: 0 10px 35px #26372f05;
+  border-radius: 16px;
 }
 .room-heading {
   display: flex;
   justify-content: space-between;
-  gap: 15px;
+  gap: 16px;
   align-items: flex-start;
 }
 .eyebrow {
@@ -102,24 +101,24 @@ header {
   margin: 0 0 10px;
 }
 h1 {
-  font-size: 25px;
+  font-size: 24px;
   line-height: 1.25;
   font-weight: 500;
-  letter-spacing: -0.8px;
+  letter-spacing: -0.4px;
   margin: 0;
 }
 .mode {
   text-transform: capitalize;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   white-space: nowrap;
 }
 .temperature-layout {
   display: grid;
-  grid-template-columns: 1fr 1.5fr;
+  grid-template-columns: 1fr 1.7fr;
   align-items: center;
-  margin: 28px 0;
-  gap: 28px;
+  margin: 20px 0 16px;
+  gap: 32px;
 }
 .label {
   font-size: 12px;
@@ -127,19 +126,19 @@ h1 {
 }
 .ambient {
   border-right: 1px solid var(--border);
-  padding: 8px 22px 8px 0;
+  padding: 0 24px 0 0;
 }
 .ambient p {
-  margin: 10px 0;
+  margin: 4px 0 12px;
 }
 .ambient strong {
-  font-size: 48px;
+  font-size: 40px;
   font-weight: 400;
-  letter-spacing: -2px;
+  letter-spacing: -1px;
   font-variant-numeric: tabular-nums;
 }
 .ambient p span {
-  font-size: 19px;
+  font-size: 16px;
   margin-left: 5px;
   color: var(--muted);
 }
@@ -153,16 +152,16 @@ h1 {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 18px;
-  margin: 14px 0;
+  gap: 24px;
+  margin: 8px 0;
 }
 .step {
   width: 48px;
   height: 48px;
   flex-shrink: 0;
   border: 1px solid var(--border);
-  border-radius: 50%;
-  background: var(--surface);
+  border-radius: 12px;
+  background: var(--soft);
   color: var(--ink);
   font-size: 28px;
   font-weight: 300;
@@ -171,13 +170,14 @@ h1 {
     transform 0.12s;
 }
 .step:hover:enabled {
-  background: var(--soft);
+  background: var(--surface);
+  border-color: var(--accent);
 }
 .step:active:enabled {
   transform: scale(0.94);
 }
 output strong {
-  font-size: 50px;
+  font-size: 64px;
   font-weight: 400;
   letter-spacing: -2px;
   font-variant-numeric: tabular-nums;
@@ -198,7 +198,7 @@ output span {
   padding: 12px 0;
   min-height: 44px;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   text-decoration: underline;
   text-underline-offset: 3px;
 }
@@ -277,27 +277,27 @@ select {
 }
 @media (max-width: 640px) {
   main {
-    padding: 24px 16px;
+    padding: 16px;
   }
-  header {
-    margin-bottom: 32px;
+  main > header {
+    margin-bottom: 12px;
   }
   .thermostat {
-    padding: 26px 22px;
+    padding: 20px;
   }
   .temperature-layout {
     grid-template-columns: 1fr;
-    margin: 30px 0;
-    gap: 30px;
+    margin: 16px 0;
+    gap: 20px;
   }
   .ambient {
     text-align: center;
     border-right: 0;
     border-bottom: 1px solid var(--border);
-    padding: 0 0 25px;
+    padding: 0 0 16px;
   }
   .ambient strong {
-    font-size: 42px;
+    font-size: 36px;
   }
   .controls {
     gap: 25px;
@@ -310,7 +310,7 @@ select {
     height: 52px;
   }
   .room-heading h1 {
-    font-size: 23px;
+    font-size: 22px;
   }
   .timing-fields {
     grid-template-columns: 1fr;
@@ -318,14 +318,14 @@ select {
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    background: #17221d;
-    color: #e5ebe3;
-    --surface: #202e26;
-    --ink: #e5ebe3;
-    --muted: #a5b3a9;
-    --border: #3c4d41;
-    --accent: #b1d7b7;
-    --soft: #2d4032;
+    background: #171a18;
+    color: #e9ece8;
+    --surface: #202421;
+    --ink: #e9ece8;
+    --muted: #a6aea7;
+    --border: #363e37;
+    --accent: #b1cdb7;
+    --soft: #2b322c;
     --warning: #f0c78b;
     --warning-bg: #413624;
   }
@@ -356,6 +356,6 @@ select {
     height: 48px;
   }
   .thermostat {
-    padding: 24px 18px;
+    padding: 20px;
   }
 }

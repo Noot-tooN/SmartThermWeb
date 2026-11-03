@@ -202,3 +202,44 @@ mode transitions, six-slot insertion/deletion/replacement, restoration, lost
 replies and partial failures. No live thermostat change was made in this work.
 The UI explains transient activation of the old stored schedule during grouping
 changes; new-mode and slot-layout paths still need observation during normal use.
+
+
+## Daily-mode readback fix — 2026-11-03
+
+The owner reported a grouping verification failure, a physical 15°C target,
+and schedule load failure after switching to Every day. A bounded read-only
+check using the previously authorized captured session confirmed HTTPS mode 2
+before and after the TCP read. No login or thermostat writes were sent.
+
+The 98-byte P reply carried first group 10, companion group 1, count 6, mode 2.
+Daily active rows were 06:00/20°C, 08:00/15°C, 12:00/15°C, 14:00/15°C,
+17:00/21°C and 22:00/15°C. The companion Monday bank had different slots.
+The HTTPS list target field separately reported 21.5°C; it is not proof of the
+physical target. The stored daily programme explains the observed 15°C interval.
+
+APK cross-check: `switchProgrammeMode` sends mode=2, day=10 without any
+periods. `DispatchPushMessage` parses day and nextDay separately, and
+`HeatAddFragmentActivity` writes both halves into its ten-group bank before
+selecting the current-mode view; it special-cases the last daily period's wrap
+to the first daily start. Neither path requires the companion day to belong to
+the selected mode. Our outgoing grouping mapping matched the APK, but our reader
+incorrectly imposed that restriction and rejected a valid day-10/day-1 reply.
+
+The decoder now validates day identifiers 1–10, all twelve slots, device, frame
+length, count and current mode; the collector retains only the active pattern's
+required groups. Completeness and conflicting-duplicate checks remain intact.
+The retained bank excludes companion groups so unrelated stored schedules cannot
+contaminate the save planner or exact readback comparison. Tests cover the
+observed daily shape, a weekly bank with a companion group outside that mode,
+and malformed companions. No automatic retry or rollback was introduced.
+
+The original grouping switch had succeeded; verification stopped before the
+new periods were sent, leaving the previously stored daily programme active.
+This does not establish factory defaults or physical application from cloud
+readings. Group switching still can temporarily activate stored periods before
+replacement writes: the upstream operation is not an atomic whole-schedule save.
+
+The owner subsequently confirmed that saving Every day worked after the decoder
+fix. The supplied screenshot shows Every day active, 07:00 at 21.5°C and 23:30
+at 18.5°C, with Accepted by server. This confirms the reported live save outcome;
+it is not a separately observed physical thermostat round trip.

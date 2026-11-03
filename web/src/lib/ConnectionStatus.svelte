@@ -215,35 +215,36 @@
 <style>
   .connection-status {
     position: relative;
-    margin-top: 14px;
+    margin-top: 8px;
   }
   .status-pair {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 24px;
-    max-width: 240px;
+    gap: 32px;
+    max-width: 280px;
     margin: 0 auto;
   }
   .status-item {
     display: flex;
     align-items: center;
-    flex-direction: column;
-    gap: 9px;
+    flex-direction: row;
+    gap: 12px;
   }
   .icon-label {
     color: var(--muted);
-    font-size: 11px;
+    font-size: 12px;
     line-height: 16px;
   }
   .status-icon {
     position: relative;
     display: grid;
     place-items: center;
-    width: 56px;
-    height: 56px;
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
     padding: 0;
     border: 1px solid var(--border);
-    border-radius: 50%;
+    border-radius: 12px;
     background: var(--soft);
     color: var(--accent);
     transition:
