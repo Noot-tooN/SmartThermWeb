@@ -2,7 +2,12 @@
   import { onDestroy, onMount } from 'svelte';
   import { boundaryLabels } from './timelineLabels';
   import {
-    clock,
+    timelinePeriods,
+    calendarChanges,
+    timelineClock as clock,
+    timelinePosition,
+  } from './timelineTime';
+  import {
     draftFromPreview,
     groups,
     labels,
@@ -307,7 +312,7 @@
   const currentGroup = $derived(
     drafts[pattern].groups.find((g) => g.group === selected)!,
   );
-  const blocks = $derived(periods(currentGroup.changes));
+  const blocks = $derived(timelinePeriods(currentGroup.changes));
   const display = $derived.by(() => {
     if (drag?.kind !== 'boundary' || !drag.moved) return blocks;
     return periods(moveBoundary(blocks, drag.index, drag.minute));
@@ -323,7 +328,7 @@
     drag = null;
     selected = group;
     choose(
-      periods(
+      timelinePeriods(
         drafts[pattern].groups.find((g) => g.group === group)!.changes,
       )[0],
     );
@@ -382,7 +387,8 @@
       }
     }, 300);
   }
-  function commit(changes: Change[], focus: number) {
+  function commit(displayChanges: Change[], focus: number) {
+    const changes = calendarChanges(displayChanges);
     normalizeSchedule({
       pattern,
       groups: drafts[pattern].groups.map((g) =>
@@ -391,8 +397,9 @@
     });
     if (JSON.stringify(changes) === JSON.stringify(currentGroup.changes)) {
       choose(
-        periods(changes).find((b) => b.start <= focus && b.end > focus) ??
-          periods(changes)[0],
+        timelinePeriods(changes).find(
+          (b) => b.start <= focus && b.end > focus,
+        ) ?? timelinePeriods(changes)[0],
       );
       return;
     }
@@ -406,8 +413,8 @@
     ];
     currentGroup.changes = changes;
     choose(
-      periods(changes).find((b) => b.start <= focus && b.end > focus) ??
-        periods(changes)[0],
+      timelinePeriods(changes).find((b) => b.start <= focus && b.end > focus) ??
+        timelinePeriods(changes)[0],
     );
     checkDraft();
   }
@@ -432,8 +439,11 @@
   function usePreset(preset: SchedulePreset) {
     try {
       commit(
-        preset.changes.map((c) => ({ ...c })),
-        preset.changes[1]?.start_minute ?? 0,
+        timelinePeriods(preset.changes).map((p) => ({
+          start_minute: p.start,
+          target_temperature: p.temperature,
+        })),
+        timelinePosition(preset.changes[1]?.start_minute ?? 0),
       );
       presetsOpen = false;
       popover = false;
@@ -444,7 +454,7 @@
   }
   function range() {
     presetsOpen = false;
-    selection = { start: 420, end: 1320, temperature: 215, range: true };
+    selection = { start: 180, end: 1080, temperature: 215, range: true };
     popover = true;
     precise = true;
     hover = null;
@@ -497,7 +507,7 @@
     selected = last.group;
     drafts[pattern].groups.find((g) => g.group === selected)!.changes =
       last.changes;
-    choose(periods(last.changes)[0]);
+    choose(timelinePeriods(last.changes)[0]);
     checkDraft();
   }
   function minuteAt(x: number, group = selected) {
@@ -779,7 +789,7 @@
       <div class="schedule-editor" inert={loading || saving}>
         {#each drafts[pattern].groups as row (row.group)}
           {@const active = selected === row.group}
-          {@const rowBlocks = periods(row.changes)}
+          {@const rowBlocks = timelinePeriods(row.changes)}
           {@const rowDisplay = active ? display : rowBlocks}
           {@const changeovers = boundaryLabels(
             rowDisplay.slice(1).map((period) => period.start),
@@ -829,7 +839,7 @@
                         >
                           <strong>{preset.name}</strong>
                           <span class="preset-strip" aria-hidden="true"
-                            >{#each periods(preset.changes) as period}<span
+                            >{#each timelinePeriods(preset.changes) as period}<span
                                 style:flex={period.end - period.start}
                                 style:background={period.temperature >= 210
                                   ? '#d9a064'
@@ -853,6 +863,7 @@
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div
               class="timeline"
+              aria-label="04:00 to 04:00, all hours belong to this row’s day"
               style:margin-bottom={changeovers.length ? '30px' : '0px'}
               use:registerTimeline={row.group}
               onpointerdown={(event) => {
@@ -907,8 +918,8 @@
                   style:left={`${label.position}%`}>{clock(label.minute)}</span
                 >{/each}
               <div class="timeline-scale" aria-hidden="true">
-                {#each [6, 12, 18] as hour}<span
-                    style:left={`${(hour / 24) * 100}%`}
+                {#each [6, 12, 18, 0] as hour}<span
+                    style:left={`${timelinePosition(hour * 60) / 14.4}%`}
                     >{hour.toString().padStart(2, '0')}</span
                   >{/each}
               </div>

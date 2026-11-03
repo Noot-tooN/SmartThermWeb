@@ -55,7 +55,7 @@ it('always shows the schedule without network traffic in draft mode', async () =
     ),
   ).toBeTruthy();
   expect(
-    screen.getByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+    screen.getByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
   ).toBeTruthy();
   expect(fetch).not.toHaveBeenCalled();
 });
@@ -75,7 +75,7 @@ it('paints immediately, automatically checks the Rust model, and undoes the whol
   ]);
   await fireEvent.click(screen.getByRole('button', { name: '↶ Undo' }));
   expect(
-    screen.getByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+    screen.getByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
   ).toBeTruthy();
 });
 it('moves boundaries by keyboard and keeps direct selection accessible', async () => {
@@ -89,13 +89,13 @@ it('moves boundaries by keyboard and keeps direct selection accessible', async (
     screen.getByRole('button', { name: '07:30 to 22:00, 21.5 degrees' }),
   ).toBeTruthy();
   await fireEvent.click(
-    screen.getByRole('button', { name: '22:00 to 24:00, 18.5 degrees' }),
+    screen.getByRole('button', { name: '22:00 to 04:00, 18.5 degrees' }),
   );
   await fireEvent.click(
     screen.getByRole('button', { name: 'Increase period temperature' }),
   );
   expect(
-    screen.getByRole('button', { name: '22:00 to 24:00, 19.0 degrees' }),
+    screen.getByRole('button', { name: '22:00 to 04:00, 19.0 degrees' }),
   ).toBeTruthy();
 });
 it('keeps independent drafts when switching patterns and day groups', async () => {
@@ -107,7 +107,7 @@ it('keeps independent drafts when switching patterns and day groups', async () =
   );
   await paintRange('Weekends');
   expect(
-    screen.getByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+    screen.getByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
   ).toBeTruthy();
   await fireEvent.click(screen.getByRole('radio', { name: 'Every day' }));
   expect(
@@ -187,12 +187,12 @@ it('cancels pointer gestures without edits and commits a completed drag as one u
   await pointer('pointercancel', 200);
   expect(screen.queryByText('Selected range')).toBeNull();
   expect(
-    screen.getByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+    screen.getByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
   ).toBeTruthy();
   await pointer('pointerdown', 100);
   await pointer('pointermove', 200);
   await pointer('pointerup', 200);
-  expect(screen.getByRole('button', { name: /05:00–10:00/ })).toBeTruthy();
+  expect(screen.getByRole('button', { name: /09:00–14:00/ })).toBeTruthy();
   await fireEvent.click(
     screen.getByRole('button', { name: 'Set 21.5°C for this range' }),
   );
@@ -202,11 +202,11 @@ it('cancels pointer gestures without edits and commits a completed drag as one u
   await pointer('pointermove', 120, handle);
   await pointer('pointercancel', 120, handle);
   expect(
-    screen.getByRole('button', { name: '05:00 to 10:00, 21.5 degrees' }),
+    screen.getByRole('button', { name: '09:00 to 14:00, 21.5 degrees' }),
   ).toBeTruthy();
   await fireEvent.click(screen.getByRole('button', { name: '↶ Undo' }));
   expect(
-    screen.getByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+    screen.getByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
   ).toBeTruthy();
 });
 
@@ -222,7 +222,7 @@ it('shows snapped hover time without changing the draft', async () => {
     bar,
     new MouseEvent('pointermove', { bubbles: true, clientX: 190 }),
   );
-  expect(document.querySelector('.hover-time')?.textContent).toBe('09:30');
+  expect(document.querySelector('.hover-time')?.textContent).toBe('13:30');
   expect(
     screen.queryByRole('group', { name: 'Edit selected period' }),
   ).toBeNull();
@@ -256,7 +256,7 @@ it('adjusts pending range handles before applying and Escape discards it', async
   await fireEvent.keyDown(window, { key: 'Escape' });
   expect(screen.queryByRole('slider', { name: 'Selection start' })).toBeNull();
   expect(
-    screen.getByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+    screen.getByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
   ).toBeTruthy();
 });
 it('keeps exact time controls contextual and removes the permanent counter and editor', async () => {
@@ -267,7 +267,7 @@ it('keeps exact time controls contextual and removes the permanent counter and e
   await paintRange();
   await fireEvent.click(screen.getByRole('button', { name: /07:00–22:00/ }));
   await fireEvent.change(screen.getByLabelText('Period start'), {
-    target: { value: '560' },
+    target: { value: '320' },
   });
   expect(
     screen.getByRole('button', { name: '09:20 to 22:00, 21.5 degrees' }),
@@ -302,36 +302,36 @@ it('shows both snapped endpoints throughout a drag in either direction, before r
   await pointer('pointerdown', 100);
   expect(
     screen.getByRole('status', { name: 'Drawing range' }).textContent,
-  ).toBe('05:00–05:00');
+  ).toBe('09:00–09:00');
   await pointer('pointermove', 200);
   expect(
     screen.getByRole('status', { name: 'Drawing range' }).textContent,
-  ).toBe('05:00–10:00');
+  ).toBe('09:00–14:00');
   await pointer('pointermove', 50);
   expect(
     screen.getByRole('status', { name: 'Drawing range' }).textContent,
-  ).toBe('02:30–05:00');
+  ).toBe('06:30–09:00');
   await pointer('pointermove', 0);
   expect(
     screen.getByRole('status', { name: 'Drawing range' }).textContent,
-  ).toBe('00:00–05:00');
+  ).toBe('04:00–09:00');
   await pointer('pointerup', 0);
   expect(screen.queryByRole('status', { name: 'Drawing range' })).toBeNull();
   expect(
     screen
       .getByRole('slider', { name: 'Selection start' })
       .getAttribute('aria-valuetext'),
-  ).toBe('00:00');
+  ).toBe('04:00');
   expect(
     screen
       .getByRole('slider', { name: 'Selection end' })
       .getAttribute('aria-valuetext'),
-  ).toBe('05:00');
+  ).toBe('09:00');
   await pointer('pointerdown', 400);
   await pointer('pointermove', 480);
   expect(
     screen.getByRole('status', { name: 'Drawing range' }).textContent,
-  ).toBe('20:00–24:00');
+  ).toBe('00:00–04:00');
   await pointer('pointercancel', 480);
   expect(screen.queryByRole('status', { name: 'Drawing range' })).toBeNull();
   expect(fetch).not.toHaveBeenCalled();
@@ -378,11 +378,11 @@ it('applies a preset only to the selected day group and restores the draft with 
     screen.getByRole('button', { name: '17:00 to 22:00, 21.5 degrees' }),
   ).toBeTruthy();
   expect(
-    screen.getByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+    screen.getByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
   ).toBeTruthy();
   await fireEvent.click(screen.getByRole('button', { name: '↶ Undo' }));
   expect(
-    screen.getAllByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+    screen.getAllByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
   ).toHaveLength(2);
 });
 it('preset templates remain unchanged after individual edits', async () => {
@@ -450,7 +450,7 @@ it('shows seven editable rows and discards edits across the entire week', async 
     screen.getByRole('button', { name: 'Discard changes' }),
   );
   expect(
-    screen.getAllByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+    screen.getAllByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
   ).toHaveLength(7);
   expect(
     (screen.getByRole('button', { name: '↶ Undo' }) as HTMLButtonElement)
@@ -552,7 +552,7 @@ it('loads real periods on mount and discards back to the loaded baseline', async
     screen.getAllByRole('button', { name: '07:00 to 23:30, 21.5 degrees' }),
   ).toHaveLength(2);
   expect(
-    screen.queryByRole('button', { name: '00:00 to 24:00, 18.5 degrees' }),
+    screen.queryByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
   ).toBeNull();
   const row = within(screen.getByRole('region', { name: 'Weekdays schedule' }));
   await fireEvent.click(
@@ -996,4 +996,35 @@ it('keeps the draft and recovery actions when the recovery read fails', async ()
     (screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement)
       .disabled,
   ).toBe(true);
+});
+
+it('edits right-hand early hours on Monday only and undoes the whole edit', async () => {
+  const fetch = mockFetch();
+  await open();
+  await fireEvent.click(screen.getByRole('radio', { name: 'Each day' }));
+  await customRange('Monday');
+  await fireEvent.change(screen.getByLabelText('Period end'), {
+    target: { value: '1440' },
+  });
+  await fireEvent.change(screen.getByLabelText('Period start'), {
+    target: { value: '1200' },
+  });
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Set 21.5°C for this range' }),
+  );
+  await vi.advanceTimersByTimeAsync(300);
+  const body = JSON.parse(fetch.mock.calls.at(-1)![1].body);
+  expect(body.groups[0].changes).toEqual([
+    { start_minute: 0, target_temperature: 215 },
+    { start_minute: 240, target_temperature: 185 },
+  ]);
+  for (const group of body.groups.slice(1)) {
+    expect(group.changes).toEqual([
+      { start_minute: 0, target_temperature: 185 },
+    ]);
+  }
+  await fireEvent.click(screen.getByRole('button', { name: '↶ Undo' }));
+  expect(
+    screen.getAllByRole('button', { name: '04:00 to 04:00, 18.5 degrees' }),
+  ).toHaveLength(7);
 });

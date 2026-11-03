@@ -14,7 +14,8 @@ Keep the system font, tabular temperature figures, mostly 400/500 weights, 4px s
 - Keep continuous debounce glow and purposeful progress pulses, with reduced-motion support. These are functional feedback explicitly requested by the user.
 - Keep stable authentication/loading geometry and schedule skeletons. No entrance animations that introduce page jumps.
 - Schedule is always expanded. All groups/days remain visible. Keep draggable boundaries, hover/drag time labels, inline editors, active-mode marker, and sticky Undo/Discard/Save.
-- Keep 06/12/18 helpers inside each timeline; no 00/24 outside labels or redundant instruction paragraph.
+- Rotate each timeline visually to start at 04:00. The 00:00–04:00 portion on the right belongs to the same row/day; stored schedule times and day ownership remain unchanged.
+- Keep 06/12/18/00 helpers inside each timeline; no outside endpoint labels or redundant instruction paragraph.
 - Put secondary diagnostics behind the info controls and refresh beside the relevant reading.
 
 ## Tool choice and attribution
