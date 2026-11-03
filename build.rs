@@ -17,7 +17,7 @@ fn main() {
             "Frontend missing. Run make build (or npm ci && npm run build in web/) first."
         );
         fs::write(destination.join("index.html"),
-            "<!doctype html><title>SmartThermWeb development</title><h1>Backend ready</h1><p>Run make dev for the dashboard, or make build for embedded assets.</p>").unwrap();
+            "<!doctype html><head><title>SmartThermWeb development</title></head><h1>Backend ready</h1><p>Run make dev for the dashboard, or make build for embedded assets.</p>").unwrap();
     }
     println!(
         "cargo:rustc-env=SMARTTHERM_ASSETS={}",

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { appUrl } from './lib/urls';
   import { onMount } from 'svelte';
   import { Dashboard } from './lib/dashboard.svelte';
   import Thermostat from './lib/Thermostat.svelte';
@@ -24,7 +25,7 @@
   });
   async function loadConfig() {
     try {
-      const response = await fetch('/api/simulator', {
+      const response = await fetch(appUrl('/api/simulator'), {
         signal: AbortSignal.timeout(8000),
       });
       if (!response.ok) throw new Error();
@@ -44,7 +45,7 @@
     simError = '';
     simMessage = '';
     try {
-      const response = await fetch('/api/simulator', {
+      const response = await fetch(appUrl('/api/simulator'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scenario, ack_ms: ackMs, apply_ms: applyMs }),
@@ -80,7 +81,7 @@
     const generation = dashboard.authGeneration;
     dashboard.streamConnected = false;
     dashboard.streamReconnecting = false;
-    const source = new EventSource('/api/events');
+    const source = new EventSource(appUrl('/api/events'));
     source.onopen = () => {
       if (generation === dashboard.authGeneration) {
         dashboard.streamConnected = true;

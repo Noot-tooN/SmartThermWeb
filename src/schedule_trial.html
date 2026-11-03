@@ -101,7 +101,7 @@
       outline-offset: 3px;
     }
   </style>
-  <a href="/">← Thermostat</a>
+  <a href="./">← Thermostat</a>
   <h1>Schedule save test</h1>
   <p>
     This tests one existing weekend period at +0.5°C, then restores it. Times,
@@ -201,7 +201,7 @@
       if (action === "apply")
         body.confirm_change = byId("confirm-change").checked;
       try {
-        const response = await fetch("/api/thermostat/schedule/trial", {
+        const response = await fetch("api/thermostat/schedule/trial", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),

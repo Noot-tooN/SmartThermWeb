@@ -1,3 +1,4 @@
+import { appUrl } from './urls';
 import type { Snapshot } from './types';
 
 export const DEBOUNCE_MS = 350;
@@ -120,7 +121,7 @@ export class Dashboard {
   async refresh() {
     const generation = this.authGeneration;
     try {
-      const response = await this.request('/api/session', {
+      const response = await this.request(appUrl('/api/session'), {
         signal: AbortSignal.timeout(8000),
         cache: 'no-store',
       });
@@ -148,7 +149,7 @@ export class Dashboard {
     this.loggingOut = true;
     this.logoutError = '';
     try {
-      const response = await this.request('/api/logout', {
+      const response = await this.request(appUrl('/api/logout'), {
         method: 'POST',
         cache: 'no-store',
         signal: AbortSignal.timeout(8000),
@@ -192,7 +193,7 @@ export class Dashboard {
     this.submitting = true;
 
     try {
-      const response = await this.request('/api/thermostat/target', {
+      const response = await this.request(appUrl('/api/thermostat/target'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

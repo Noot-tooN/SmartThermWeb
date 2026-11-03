@@ -4,6 +4,7 @@ use axum::http::{HeaderMap, Uri, header};
 #[derive(Clone, Default)]
 pub struct BrowserAccess {
     public_origin: Option<String>,
+    base_path: String,
 }
 impl BrowserAccess {
     pub fn https(origin: &str) -> Result<Self, &'static str> {
@@ -21,7 +22,40 @@ impl BrowserAccess {
         }
         Ok(Self {
             public_origin: Some(value.to_owned()),
+            ..Self::default()
         })
+    }
+    /// Empty means the root; otherwise a normalized, literal URL prefix.
+    pub fn with_base_path(mut self, path: &str) -> Result<Self, &'static str> {
+        if !path.is_empty()
+            && path != "/"
+            && (!path.starts_with('/')
+                || path.ends_with('/')
+                || path[1..].split('/').any(|part| {
+                    part.is_empty()
+                        || part == "."
+                        || part == ".."
+                        || !part
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                }))
+        {
+            return Err(
+                "SMARTTHERM_BASE_PATH must be a literal path like /heating, without a trailing slash",
+            );
+        }
+        self.base_path = if path == "/" {
+            String::new()
+        } else {
+            path.to_owned()
+        };
+        Ok(self)
+    }
+    pub fn base_path(&self) -> &str {
+        &self.base_path
+    }
+    pub fn cookie_path(&self) -> String {
+        format!("{}/", self.base_path)
     }
     pub fn secure_cookie(&self) -> bool {
         self.public_origin.is_some()
@@ -85,6 +119,30 @@ mod tests {
         request.insert("x-forwarded-proto", "https".parse().unwrap());
         assert!(!policy.allows(&request));
         assert!(!policy.allows(&HeaderMap::new()));
+    }
+    #[test]
+    fn prefix_validation_rejects_ambiguous_or_injectable_paths() {
+        for path in ["", "/", "/heating", "/home/heating"] {
+            assert!(BrowserAccess::default().with_base_path(path).is_ok());
+        }
+        for path in [
+            "heating",
+            "//heating",
+            "/heating/",
+            "/a/../b",
+            "/a//b",
+            "/a?b",
+            "/a#b",
+            "/a%2fb",
+            "/a\"b",
+            "/a;b",
+            "/a\\b",
+        ] {
+            assert!(
+                BrowserAccess::default().with_base_path(path).is_err(),
+                "{path}"
+            );
+        }
     }
     #[test]
     fn local_default_remains_local_and_bad_configuration_fails() {

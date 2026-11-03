@@ -22,7 +22,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .map(|origin| smartthermweb::browser_access::BrowserAccess::https(&origin))
         .transpose()?
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .with_base_path(&std::env::var("SMARTTHERM_BASE_PATH").unwrap_or_default())?;
     if access.secure_cookie() && provider_name != "ocstat" {
         return Err("Hosted mode requires the authenticated OCSTAT provider.".into());
     }

@@ -14,6 +14,12 @@ in {
       default = 3000;
       description = "Localhost port for the HTTPS reverse proxy.";
     };
+    basePath = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+      example = "/heating";
+      description = "URL prefix without a trailing slash; empty serves at the root.";
+    };
     publicOrigin = lib.mkOption {
       type = lib.types.str;
       example = "https://heating.homeserver.com";
@@ -34,6 +40,7 @@ in {
         SMARTTHERM_PROVIDER = "ocstat";
         SMARTTHERM_BIND = "127.0.0.1:${toString cfg.port}";
         SMARTTHERM_PUBLIC_ORIGIN = cfg.publicOrigin;
+        SMARTTHERM_BASE_PATH = cfg.basePath;
       };
       serviceConfig = {
         ExecStart = lib.getExe cfg.package;

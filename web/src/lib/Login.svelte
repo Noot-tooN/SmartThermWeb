@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { appUrl } from './urls';
   import type { Dashboard } from './dashboard.svelte';
   let { dashboard }: { dashboard: Dashboard } = $props();
   let email = $state('');
@@ -28,7 +29,7 @@
     const body = JSON.stringify({ email: email.trim(), password });
     password = '';
     try {
-      const response = await fetch('/api/login', {
+      const response = await fetch(appUrl('/api/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,

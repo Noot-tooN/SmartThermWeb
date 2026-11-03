@@ -167,15 +167,15 @@ impl Sessions {
 
 /// HttpOnly keeps the opaque session identifier out of frontend JavaScript.
 /// Hosted mode always uses Secure; loopback development can use HTTP.
-pub fn session_cookie(token: &str, secure: bool) -> String {
+pub fn session_cookie(token: &str, secure: bool, path: &str) -> String {
     let suffix = if secure { "; Secure" } else { "" };
     format!(
-        "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECONDS}{suffix}"
+        "{COOKIE_NAME}={token}; Path={path}; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECONDS}{suffix}"
     )
 }
-pub fn clear_cookie(secure: bool) -> String {
+pub fn clear_cookie(secure: bool, path: &str) -> String {
     let suffix = if secure { "; Secure" } else { "" };
-    format!("smarttherm_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{suffix}")
+    format!("smarttherm_session=; Path={path}; HttpOnly; SameSite=Strict; Max-Age=0{suffix}")
 }
 pub fn cookie_token(headers: &axum::http::HeaderMap) -> Option<String> {
     let mut found = None;

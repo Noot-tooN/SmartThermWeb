@@ -53,7 +53,8 @@ pub fn router_with_browser_access(
     } else {
         Router::new()
     };
-    Router::new()
+    let base_path = access.base_path().to_owned();
+    let app = Router::new()
         .merge(trial_routes)
         .route(
             "/api/login",
@@ -80,9 +81,21 @@ pub fn router_with_browser_access(
             "/api/simulator",
             get(simulator_config).put(configure_simulator),
         )
+        .route("/", get(assets))
         .fallback(assets)
         .layer(Extension(access))
-        .with_state(state)
+        .with_state(state);
+    if base_path.is_empty() {
+        app
+    } else {
+        let destination = format!("{base_path}/");
+        Router::new()
+            .route(
+                &base_path,
+                get(move || async move { axum::response::Redirect::permanent(&destination) }),
+            )
+            .nest(&format!("{base_path}/"), app)
+    }
 }
 #[derive(Debug)]
 pub enum ApiError {
@@ -243,13 +256,10 @@ async fn login(
     }
     Ok((
         StatusCode::OK,
-        [
-            (header::CACHE_CONTROL, "no-store".to_owned()),
-            (
-                header::SET_COOKIE,
-                session_cookie(&token, access.secure_cookie()),
-            ),
-        ],
+        session_headers(
+            &access,
+            session_cookie(&token, access.secure_cookie(), &access.cookie_path()),
+        ),
         Json(snapshot),
     ))
 }
@@ -266,12 +276,26 @@ async fn logout(
         sessions.logout(&token);
     }
     Ok((
-        [
-            (header::CACHE_CONTROL, "no-store".to_owned()),
-            (header::SET_COOKIE, clear_cookie(access.secure_cookie())),
-        ],
+        session_headers(
+            &access,
+            clear_cookie(access.secure_cookie(), &access.cookie_path()),
+        ),
         Json(state.controller.snapshot()),
     ))
+}
+fn session_headers(access: &BrowserAccess, cookie: String) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    headers.append(header::SET_COOKIE, cookie.parse().unwrap());
+    // Cookies are shared across ports. Retire the previous root cookie so it
+    // cannot collide with the new, path-scoped session after migration.
+    if !access.base_path().is_empty() {
+        headers.append(
+            header::SET_COOKIE,
+            clear_cookie(access.secure_cookie(), "/").parse().unwrap(),
+        );
+    }
+    headers
 }
 fn browser_session(state: &AppState, headers: &HeaderMap) -> Option<Arc<BrowserSession>> {
     let sessions = state.sessions.as_ref()?;
@@ -555,7 +579,7 @@ fn event(snapshot: &crate::domain::Snapshot) -> Event {
         .json_data(snapshot)
         .expect("snapshot is serializable")
 }
-async fn assets(uri: Uri) -> Response {
+async fn assets(Extension(access): Extension<BrowserAccess>, uri: Uri) -> Response {
     if uri.path() == "/api" || uri.path().starts_with("/api/") {
         return (
             StatusCode::NOT_FOUND,
@@ -584,16 +608,28 @@ async fn assets(uri: Uri) -> Response {
                 },
             )
             .header("x-content-type-options", "nosniff")
-            .body(Body::from(file.data.into_owned()))
+            .body(Body::from(if path == "index.html" {
+                String::from_utf8_lossy(&file.data)
+                    .replace(
+                        "<head>",
+                        &format!("<head><base href=\"{}\">", access.cookie_path()),
+                    )
+                    .into_bytes()
+            } else {
+                file.data.into_owned()
+            }))
             .unwrap(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-async fn schedule_trial_page() -> impl IntoResponse {
+async fn schedule_trial_page(Extension(access): Extension<BrowserAccess>) -> impl IntoResponse {
     (
         [(header::CACHE_CONTROL, "no-store")],
-        axum::response::Html(include_str!("schedule_trial.html")),
+        axum::response::Html(include_str!("schedule_trial.html").replace(
+            "<head>",
+            &format!("<head><base href=\"{}\">", access.cookie_path()),
+        )),
     )
 }
 async fn schedule_trial(

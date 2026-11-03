@@ -1176,3 +1176,130 @@ async fn hosted_https_login_cookie_writes_and_logout_use_explicit_origin() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test(start_paused = true)]
+async fn subpath_routes_assets_sessions_and_events_without_exposing_root_api() {
+    use smartthermweb::{api::router_with_browser_access, browser_access::BrowserAccess};
+    let app = router_with_browser_access(
+        AppState {
+            controller: Controller::ocstat_read_only(),
+            simulator: None,
+            sessions: Some(Arc::new(smartthermweb::sessions::Sessions::with_factory(
+                Arc::new(|| Ok(Arc::new(FakeAccount::default()))),
+            ))),
+        },
+        false,
+        BrowserAccess::https("https://home.example.test")
+            .unwrap()
+            .with_base_path("/heating")
+            .unwrap(),
+    );
+    let request = |path: &str| Request::builder().uri(path).body(Body::empty()).unwrap();
+    let redirect = app.clone().oneshot(request("/heating")).await.unwrap();
+    assert_eq!(redirect.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(redirect.headers()["location"], "/heating/");
+    for path in [
+        "/api/health",
+        "/api/session",
+        "/heating/api/missing",
+        "/heating-other/api/health",
+    ] {
+        assert_eq!(
+            app.clone().oneshot(request(path)).await.unwrap().status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(request("/heating/api/health"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let page = app.clone().oneshot(request("/heating/")).await.unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        page.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("<base href=\"/heating/\">"));
+    // When bundled assets exist, verify the generated HTML's relative JS URL
+    // actually resolves through the nested router (also checked in Nix builds).
+    if let Some((_, tail)) = html.split_once("src=\"./assets/") {
+        let asset = tail.split('"').next().unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(request(&format!("/heating/assets/{asset}")))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let mut login = login_request(
+        r#"{"email":"test@example.invalid","password":"TEST_PASSWORD_ONLY"}"#,
+        "home.example.test",
+        "https://home.example.test",
+    );
+    *login.uri_mut() = "/heating/api/login".parse().unwrap();
+    let logged_in = app.clone().oneshot(login).await.unwrap();
+    assert_eq!(logged_in.status(), StatusCode::OK);
+    let cookies: Vec<_> = logged_in
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(cookies.len(), 2);
+    assert!(cookies[0].contains("Path=/heating/; HttpOnly; SameSite=Strict"));
+    assert!(cookies[0].contains("; Secure"));
+    assert!(cookies[1].contains("Path=/;") && cookies[1].contains("Max-Age=0"));
+    let cookie = cookies[0].split(';').next().unwrap().to_owned();
+    for path in [
+        "/heating/api/session",
+        "/heating/api/thermostat",
+        "/heating/api/events",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(get_with_cookie(path, &cookie))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        if path.ends_with("events") {
+            assert_eq!(response.headers()["content-type"], "text/event-stream");
+        }
+    }
+    let logout = Request::builder()
+        .method("POST")
+        .uri("/heating/api/logout")
+        .header("host", "home.example.test")
+        .header("origin", "https://home.example.test")
+        .header("cookie", &cookie)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(logout).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookies: Vec<_> = response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert!(cookies.iter().all(|c| c.contains("Max-Age=0")));
+    assert!(cookies[0].contains("Path=/heating/;"));
+    assert_eq!(
+        app.oneshot(get_with_cookie("/heating/api/thermostat", &cookie))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}

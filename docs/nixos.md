@@ -123,3 +123,14 @@ assets, health, authentication requirements, origin rejection and Secure logout
 cookies. No OCSTAT login or thermostat command was used. This verifies packaging
 and local request handling; the real HTTPS endpoint and restricted systemd
 service still need checking after the owner chooses to activate the integration.
+
+## Hosting at a subpath
+
+Set `services.smartthermweb.basePath = "/heating"` (or `SMARTTHERM_BASE_PATH`)
+and set `publicOrigin` to the hostname's HTTPS origin, without the path.
+Proxy `/heating/*` unchanged to the backend; do not strip the prefix. The app
+redirects `/heating` to `/heating/`. Assets, APIs, SSE and the optional trial page
+use this prefix. The same binary also supports root hosting with the default
+empty prefix. Session cookies are scoped to `/heating/`; login/logout also
+expire the old root cookie to avoid collisions after moving from a separate port.
+All apps hosted under paths on this origin share the browser's origin boundary.

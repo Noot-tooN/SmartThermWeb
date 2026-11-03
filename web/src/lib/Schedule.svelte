@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { appUrl } from './urls';
   import { onDestroy, onMount } from 'svelte';
   import { boundaryLabels } from './timelineLabels';
   import {
@@ -91,7 +92,7 @@
     const controller = new AbortController();
     saveRequest = controller;
     try {
-      const response = await fetch('/api/thermostat/schedule', {
+      const response = await fetch(appUrl('/api/thermostat/schedule'), {
         method: checkOnly ? 'GET' : 'PUT',
         ...(checkOnly
           ? {}
@@ -171,8 +172,8 @@
     try {
       const response = await fetch(
         recover
-          ? '/api/thermostat/schedule/recover'
-          : '/api/thermostat/schedule',
+          ? appUrl('/api/thermostat/schedule/recover')
+          : appUrl('/api/thermostat/schedule'),
         {
           ...(recover ? { method: 'POST' } : {}),
           signal: AbortSignal.any([
@@ -356,15 +357,18 @@
       const controller = new AbortController();
       request = controller;
       try {
-        const response = await fetch('/api/thermostat/schedule/preview', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body,
-          signal: AbortSignal.any([
-            controller.signal,
-            AbortSignal.timeout(8000),
-          ]),
-        });
+        const response = await fetch(
+          appUrl('/api/thermostat/schedule/preview'),
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+            signal: AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(8000),
+            ]),
+          },
+        );
         if (version !== generation) return;
         if (response.status === 401) {
           onExpired();

@@ -42,7 +42,7 @@ class FakeEventSource extends EventTarget {
   onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
   close = vi.fn();
-  constructor() {
+  constructor(public url: string) {
     super();
     FakeEventSource.instances.push(this);
   }
@@ -67,6 +67,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  document.querySelector('base')?.remove();
   vi.unstubAllGlobals();
 });
 
@@ -185,4 +186,30 @@ it('removes old readings immediately while a revoked session is checked', async 
   expect(screen.queryByRole('button', { name: 'Refresh readings' })).toBeNull();
   finish(response(signedOut));
   await screen.findByRole('heading', { name: 'Sign in to OCSTAT' });
+});
+
+it('keeps session requests, schedule reads and live events under the hosted prefix', async () => {
+  const base = document.createElement('base');
+  base.href = '/heating/';
+  document.head.append(base);
+  const request = vi.fn<typeof fetch>().mockImplementation(async (url) => {
+    if (url === '/heating/api/session') return response(signedIn);
+    return { ok: false, status: 503 } as Response;
+  });
+  vi.stubGlobal('fetch', request);
+  render(App);
+  await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+  expect(FakeEventSource.instances[0].url).toBe('/heating/api/events');
+  await vi.waitFor(() =>
+    expect(
+      request.mock.calls.some(
+        ([url]) => url === '/heating/api/thermostat/schedule',
+      ),
+    ).toBe(true),
+  );
+  expect(
+    request.mock.calls.every(([url]) =>
+      String(url).startsWith('/heating/api/'),
+    ),
+  ).toBe(true);
 });
