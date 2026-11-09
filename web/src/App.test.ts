@@ -213,3 +213,39 @@ it('keeps session requests, schedule reads and live events under the hosted pref
     ),
   ).toBe(true);
 });
+
+it('keeps an authenticated session with unavailable readings and disables temperature controls', async () => {
+  const { request, resolve } = pendingSession();
+  request.mockResolvedValue({ ok: false, status: 503 } as Response);
+  resolve(
+    response({
+      ...signedIn,
+      confirmed: null,
+      desired: null,
+      last_sync: null,
+      can_set_target: false,
+      read_error: 'invalid_response',
+      connectivity: 'unavailable',
+    }),
+  );
+  render(App);
+  await screen.findByText(
+    'Signed in, but thermostat readings are unavailable. Retrying automatically.',
+    { selector: 'p' },
+  );
+  expect(
+    screen.queryByRole('heading', { name: 'Sign in to OCSTAT' }),
+  ).toBeNull();
+  expect(
+    screen.getByLabelText('Desired target temperature').textContent,
+  ).not.toMatch(/\d/);
+  for (const name of [
+    'Decrease target temperature by 0.5 degrees',
+    'Increase target temperature by 0.5 degrees',
+  ]) {
+    expect(
+      (screen.getByRole('button', { name }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  }
+  await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+});

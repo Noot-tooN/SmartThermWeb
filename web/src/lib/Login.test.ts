@@ -115,3 +115,35 @@ it('uses a safe error instead of displaying response messages', async () => {
   );
   expect(screen.queryByText('DO_NOT_RENDER_SECRET')).toBeNull();
 });
+
+it.each([
+  [
+    'cloud_unavailable',
+    'OCSTAT is unavailable or returned an unreadable response.',
+  ],
+  ['invalid_origin', 'Open the configured heating address'],
+])('explains %s without exposing upstream messages', async (code, expected) => {
+  const dashboard = new Dashboard();
+  dashboard.accept(initial);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({ error: { code, message: 'DO_NOT_RENDER_SECRET' } }),
+    }),
+  );
+  render(Login, { dashboard });
+  await fireEvent.input(screen.getByLabelText('Email'), {
+    target: { value: 'example@example.invalid' },
+  });
+  await fireEvent.input(screen.getByLabelText('Password'), {
+    target: { value: 'TEST_PASSWORD_ONLY' },
+  });
+  await fireEvent.submit(
+    screen.getByRole('button', { name: 'Sign in' }).closest('form')!,
+  );
+  await vi.waitFor(() =>
+    expect(screen.getByRole('alert').textContent).toContain(expected),
+  );
+  expect(screen.queryByText('DO_NOT_RENDER_SECRET')).toBeNull();
+});

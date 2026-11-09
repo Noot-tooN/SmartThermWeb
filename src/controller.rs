@@ -352,7 +352,7 @@ impl Controller {
     ) {
         let account_email = email.clone();
         match timeout(timing.request, provider.login(email, password)).await {
-            Ok(Ok(observed)) => {
+            Ok(Ok(authenticated)) => {
                 {
                     let mut core = self.core.lock().unwrap();
                     if core.pending_logout {
@@ -361,7 +361,10 @@ impl Controller {
                     core.state.login = Some(LoginState::Ready);
                     core.state.account_email = Some(account_email);
                 }
-                self.observe(observed);
+                match authenticated.observation {
+                    Ok(observed) => self.observe(observed),
+                    Err(error) => self.read_failed(error),
+                }
             }
             result => {
                 {
@@ -826,8 +829,12 @@ mod tests {
         cleared: std::sync::atomic::AtomicBool,
     }
     impl Provider for SlowAccount {
-        fn login(&self, _: String, _: String) -> crate::provider::ProviderFuture<'_, DeviceState> {
-            self.read()
+        fn login(
+            &self,
+            _: String,
+            _: String,
+        ) -> crate::provider::ProviderFuture<'_, crate::provider::Authenticated> {
+            Box::pin(async { self.read().await.map(Into::into) })
         }
         fn read(&self) -> crate::provider::ProviderFuture<'_, DeviceState> {
             Box::pin(async {
@@ -931,12 +938,12 @@ mod tests {
             &self,
             _email: String,
             _password: String,
-        ) -> crate::provider::ProviderFuture<'_, DeviceState> {
+        ) -> crate::provider::ProviderFuture<'_, crate::provider::Authenticated> {
             self.calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Box::pin(async move {
                 if self.succeed {
-                    Ok(observation(1, None, 215))
+                    Ok(observation(1, None, 215).into())
                 } else {
                     Err(ProviderError::Authentication)
                 }

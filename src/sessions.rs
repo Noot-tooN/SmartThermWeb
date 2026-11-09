@@ -213,7 +213,11 @@ mod tests {
         }
     }
     impl Provider for PendingProvider {
-        fn login(&self, _: String, _: String) -> ProviderFuture<'_, DeviceState> {
+        fn login(
+            &self,
+            _: String,
+            _: String,
+        ) -> ProviderFuture<'_, crate::provider::Authenticated> {
             Box::pin(std::future::pending())
         }
         fn read(&self) -> ProviderFuture<'_, DeviceState> {

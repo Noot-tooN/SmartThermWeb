@@ -383,7 +383,7 @@ impl smartthermweb::provider::Provider for FakeAccount {
         &self,
         email: String,
         password: String,
-    ) -> smartthermweb::provider::ProviderFuture<'_, smartthermweb::domain::DeviceState> {
+    ) -> smartthermweb::provider::ProviderFuture<'_, smartthermweb::provider::Authenticated> {
         Box::pin(async move {
             use smartthermweb::{
                 domain::{DeviceState, Mode, Temperature},
@@ -416,7 +416,7 @@ impl smartthermweb::provider::Provider for FakeAccount {
                 target_writable: true,
             };
             *self.0.lock().unwrap() = Some(state.clone());
-            Ok(state)
+            Ok(state.into())
         })
     }
     fn read(
@@ -1302,4 +1302,82 @@ async fn subpath_routes_assets_sessions_and_events_without_exposing_root_api() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
+}
+
+// Authenticate successfully but withhold the first observation. Later polling recovers.
+struct UnavailableAtLogin(FakeAccount);
+impl smartthermweb::provider::Provider for UnavailableAtLogin {
+    fn login(
+        &self,
+        email: String,
+        password: String,
+    ) -> smartthermweb::provider::ProviderFuture<'_, smartthermweb::provider::Authenticated> {
+        Box::pin(async move {
+            self.0.login(email, password).await?;
+            Ok(smartthermweb::provider::Authenticated {
+                observation: Err(smartthermweb::provider::ProviderError::InvalidResponse),
+            })
+        })
+    }
+    fn read(
+        &self,
+    ) -> smartthermweb::provider::ProviderFuture<'_, smartthermweb::domain::DeviceState> {
+        self.0.read()
+    }
+    fn send_target(
+        &self,
+        _: u64,
+        _: smartthermweb::domain::TargetTemperature,
+    ) -> smartthermweb::provider::ProviderFuture<'_, ()> {
+        panic!("unavailable readings must not permit writes")
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn login_with_unavailable_readings_creates_session_blocks_writes_and_recovers() {
+    let app = router(AppState {
+        controller: Controller::ocstat(),
+        simulator: None,
+        sessions: Some(Arc::new(smartthermweb::sessions::Sessions::with_factory(
+            Arc::new(|| Ok(Arc::new(UnavailableAtLogin(FakeAccount::default())))),
+        ))),
+    });
+    let cookie = sign_in(&app, "example@example.invalid").await;
+    let state = json(
+        app.clone()
+            .oneshot(get_with_cookie("/api/session", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(state["login"], "ready");
+    assert_eq!(state["read_error"], "invalid_response");
+    assert_eq!(state["can_set_target"], false);
+    assert!(state["confirmed"].is_null() && state["desired"].is_null());
+    let request = Request::builder()
+        .method("PUT")
+        .uri("/api/thermostat/target")
+        .header("host", "localhost:3000")
+        .header("origin", "http://localhost:3000")
+        .header("cookie", &cookie)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"target_temperature":220,"client_id":"test","client_revision":1}"#,
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+    let recovered = json(
+        app.oneshot(get_with_cookie("/api/session", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(recovered["login"], "ready");
+    assert!(recovered["read_error"].is_null());
+    assert_eq!(recovered["confirmed"]["room_temperature"], 210);
+    assert_eq!(recovered["can_set_target"], true);
 }

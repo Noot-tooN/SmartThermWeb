@@ -47,7 +47,9 @@ export class Dashboard {
       case 'device_not_found':
         return 'The configured thermostat was not returned by the cloud.';
       case 'invalid_response':
-        return 'The cloud returned an unreadable device status. Showing the last known reading.';
+        return this.state?.confirmed
+          ? 'The cloud returned an unreadable device status. Showing the last known reading.'
+          : 'Signed in, but thermostat readings are unavailable. Retrying automatically.';
       case 'offline':
         return 'The device is offline. Showing the last known reading.';
       default:

@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory(prefix="smarttherm-smoke-") as directory:
 
         assert json.load(request("/api/health"))["status"] == "ok"
         html = request("/").read().decode()
-        assets = re.findall(r'(?:src|href)="(/assets/[^" ]+)"', html)
+        assets = re.findall(r'(?:src|href)="\.?(/assets/[^" ]+)"', html)
         assert len(assets) >= 2, "Compiled frontend was not embedded"
         for asset in assets:
             assert request(asset).status == 200
