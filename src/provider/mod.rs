@@ -26,6 +26,21 @@ pub enum ProviderError {
     MultipleDevices,
 }
 
+/// Authentication succeeded; the first device read may still be unavailable.
+/// Only non-authentication read errors belong in `observation`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Authenticated {
+    pub observation: Result<DeviceState, ProviderError>,
+}
+
+impl From<DeviceState> for Authenticated {
+    fn from(observation: DeviceState) -> Self {
+        Self {
+            observation: Ok(observation),
+        }
+    }
+}
+
 /// Returning Ok from send_target means cloud acceptance, never device application.
 /// Canceling this future cannot be assumed to cancel a real-world side effect.
 pub trait Provider: Send + Sync {
@@ -34,7 +49,7 @@ pub trait Provider: Send + Sync {
         Box::pin(async {})
     }
     /// Called only by the controller worker. Credentials must never be logged.
-    fn login(&self, _email: String, _password: String) -> ProviderFuture<'_, DeviceState> {
+    fn login(&self, _email: String, _password: String) -> ProviderFuture<'_, Authenticated> {
         Box::pin(async { Err(ProviderError::ReadOnly) })
     }
     fn schedule_trial(

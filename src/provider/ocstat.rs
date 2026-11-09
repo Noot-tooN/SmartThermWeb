@@ -1,5 +1,5 @@
 //! HTTPS-only OCSTAT adapter with Auto/temporary-override target changes. Never log credentials or upstream bodies.
-use super::{Provider, ProviderError, ProviderFuture};
+use super::{Authenticated, Provider, ProviderError, ProviderFuture};
 use crate::domain::{DeviceState, Mode, TargetTemperature, Temperature};
 use serde::Deserialize;
 use std::time::Duration;
@@ -117,7 +117,6 @@ struct ListedDevice {
     device_name: Option<String>,
     device_id: String,
     online: Option<bool>,
-    current_temprature: Option<String>,
     inside_temparature: Option<String>,
     work_mode: Option<String>,
     program_mode: Option<String>,
@@ -137,11 +136,7 @@ fn decode_login(body: &[u8]) -> Result<Session, ProviderError> {
     }
     Ok(session)
 }
-fn decode_device(
-    body: &[u8],
-    device_id: Option<&str>,
-    revision: u64,
-) -> Result<DeviceState, ProviderError> {
+fn decode_device(body: &[u8], device_id: Option<&str>) -> Result<ListedDevice, ProviderError> {
     let response: ListResponse =
         serde_json::from_slice(body).map_err(|_| ProviderError::InvalidResponse)?;
     if !response.statu {
@@ -158,31 +153,44 @@ fn decode_device(
     let mut matches = devices
         .into_iter()
         .filter(|d| device_id.is_none_or(|id| d.device_id == id));
-    let device = matches.next().ok_or(ProviderError::DeviceNotFound)?;
+    let mut device = matches.next().ok_or(ProviderError::DeviceNotFound)?;
     if matches.next().is_some() {
         return Err(ProviderError::InvalidResponse);
     }
-    fn temperature(raw: Option<String>) -> Result<Temperature, ProviderError> {
-        raw.and_then(|v| v.parse::<i16>().ok())
+    device.device_name = device.device_name.and_then(|name| {
+        let name: String = name.chars().filter(|c| !c.is_control()).take(120).collect();
+        let name = name.trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    });
+    Ok(device)
+}
+impl ListedDevice {
+    fn observation(
+        &self,
+        status: &StatusObservation,
+        revision: u64,
+    ) -> Result<DeviceState, ProviderError> {
+        let room_temperature = self
+            .inside_temparature
+            .as_ref()
+            .and_then(|v| v.parse::<i16>().ok())
             .map(Temperature)
-            .ok_or(ProviderError::InvalidResponse)
+            .ok_or(ProviderError::InvalidResponse)?;
+        Ok(DeviceState {
+            device_name: self.device_name.clone(),
+            room_temperature,
+            // The listing's current_temprature is inconsistent and unnecessary:
+            // both targets come from the validated device-status frame.
+            target_temperature: status.reported,
+            requested_temperature: Some(status.requested),
+            online: self.online.ok_or(ProviderError::InvalidResponse)?,
+            mode: Mode::Unknown("unverified".into()),
+            revision,
+            applied_command: None,
+            matched_command: None,
+            target_writable: false,
+        })
     }
-    Ok(DeviceState {
-        device_name: device.device_name.and_then(|name| {
-            let name: String = name.chars().filter(|c| !c.is_control()).take(120).collect();
-            let name = name.trim();
-            (!name.is_empty()).then(|| name.to_owned())
-        }),
-        room_temperature: temperature(device.inside_temparature)?,
-        target_temperature: temperature(device.current_temprature.clone())?,
-        requested_temperature: Some(temperature(device.current_temprature)?),
-        online: device.online.ok_or(ProviderError::InvalidResponse)?,
-        mode: Mode::Unknown("unverified".into()),
-        revision,
-        applied_command: None,
-        matched_command: None,
-        target_writable: false,
-    })
 }
 /// Only the two fields demonstrated by the capture and HTTPS round-trip test.
 /// No timestamp or application correlation is inferred from this frame.
@@ -339,15 +347,7 @@ impl Ocstat {
             ("device_type", "1".into()),
         ];
         let body = self.transport.post(Endpoint::DeviceList, form).await?;
-        let mut observed = decode_device(&body, auth.device_id.as_deref(), auth.revision + 1)?;
-        let list: ListResponse =
-            serde_json::from_slice(&body).map_err(|_| ProviderError::InvalidResponse)?;
-        let device = list
-            .devices
-            .ok_or(ProviderError::InvalidResponse)?
-            .into_iter()
-            .find(|d| auth.device_id.as_ref().is_none_or(|id| id == &d.device_id))
-            .ok_or(ProviderError::DeviceNotFound)?;
+        let device = decode_device(&body, auth.device_id.as_deref())?;
         // Pin even if status fails; subsequent attempts cannot silently select a new device.
         auth.device_id = Some(device.device_id.clone());
         let status = self
@@ -362,8 +362,7 @@ impl Ocstat {
             )
             .await?;
         let status = decode_status(&status, &device.device_id)?;
-        observed.target_temperature = status.reported;
-        observed.requested_temperature = Some(status.requested);
+        let mut observed = device.observation(&status, auth.revision + 1)?;
         // List and status are sequential observations, not an atomic device snapshot.
         // Their values can disagree during a change; neither invents command correlation.
         auth.context = Some(WriteContext {
@@ -551,7 +550,7 @@ impl Provider for Ocstat {
             auth.attempt = None;
         })
     }
-    fn login(&self, email: String, password: String) -> ProviderFuture<'_, DeviceState> {
+    fn login(&self, email: String, password: String) -> ProviderFuture<'_, Authenticated> {
         Box::pin(async move {
             self.logout().await;
             if [&email, &password]
@@ -571,7 +570,19 @@ impl Provider for Ocstat {
                 .await?;
             let session = decode_login(&body)?;
             self.auth.lock().await.session = Some(session);
-            self.read_device().await
+            let observation = self.read_device().await;
+            // Explicit authentication/discovery failures retain their existing login errors.
+            // An unreadable temperature or a transient read failure must not discard a
+            // successfully authenticated session. Polling can recover without a password.
+            match observation {
+                Err(
+                    error @ (ProviderError::Authentication
+                    | ProviderError::LoginRequired
+                    | ProviderError::DeviceNotFound
+                    | ProviderError::MultipleDevices),
+                ) => Err(error),
+                observation => Ok(Authenticated { observation }),
+            }
         })
     }
     fn schedule_trial(&self, action: trial::Action) -> ProviderFuture<'_, trial::Status> {
@@ -655,7 +666,111 @@ mod tests {
                 "example@example.invalid".into(),
                 "TEST_PASSWORD_ONLY".into(),
             )
+            .await?
+            .observation
+    }
+    fn decode_fixture_device(
+        body: &[u8],
+        device_id: Option<&str>,
+        revision: u64,
+    ) -> Result<DeviceState, ProviderError> {
+        super::decode_device(body, device_id)?.observation(
+            &StatusObservation {
+                requested: Temperature(215),
+                reported: Temperature(215),
+                mode_marker: b'1',
+            },
+            revision,
+        )
+    }
+    #[tokio::test]
+    async fn inconsistent_listing_target_never_blocks_valid_status_targets() {
+        for value in [
+            serde_json::Value::Null,
+            "".into(),
+            "21.5".into(),
+            "unavailable".into(),
+            "99999".into(),
+            215.into(),
+        ] {
+            let mut list: serde_json::Value = serde_json::from_slice(&single()).unwrap();
+            list["devices"][0]["current_temprature"] = value;
+            let (provider, fake) = fixture(vec![
+                Ok(LOGIN.to_vec()),
+                Ok(serde_json::to_vec(&list).unwrap()),
+            ]);
+            let observed = login(&provider).await.unwrap();
+            assert_eq!(observed.requested_temperature, Some(Temperature(215)));
+            assert_eq!(observed.target_temperature, Temperature(215));
+            assert!(observed.target_writable);
+            assert_eq!(fake.calls.lock().unwrap().len(), 3);
+        }
+    }
+    #[tokio::test]
+    async fn authenticated_session_survives_missing_room_reading_and_recovers_without_password() {
+        let mut list: serde_json::Value = serde_json::from_slice(&single()).unwrap();
+        list["devices"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("current_temprature");
+        list["devices"][0]["inside_temparature"] = serde_json::Value::Null;
+        let (provider, fake) = fixture(vec![
+            Ok(LOGIN.to_vec()),
+            Ok(serde_json::to_vec(&list).unwrap()),
+            Ok(single()),
+        ]);
+        let authenticated = provider
+            .login(
+                "example@example.invalid".into(),
+                "TEST_PASSWORD_ONLY".into(),
+            )
             .await
+            .unwrap();
+        assert_eq!(
+            authenticated.observation,
+            Err(ProviderError::InvalidResponse)
+        );
+        assert!(provider.auth.lock().await.context.is_none());
+        let recovered = provider.read().await.unwrap();
+        assert_eq!(recovered.room_temperature, Temperature(211));
+        assert!(recovered.target_writable);
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|c| c.0 == Endpoint::Login).count(), 1);
+        assert!(calls.iter().all(|c| matches!(
+            c.0,
+            Endpoint::Login | Endpoint::DeviceList | Endpoint::DeviceStatus
+        )));
+    }
+    #[tokio::test]
+    async fn initial_status_failure_never_exposes_writable_context() {
+        for error in [
+            ProviderError::Transport,
+            ProviderError::InvalidResponse,
+            ProviderError::Authentication,
+        ] {
+            let fake = Arc::new(Fake {
+                replies: StdMutex::new(VecDeque::from([
+                    Ok(LOGIN.to_vec()),
+                    Ok(single()),
+                    Err(error),
+                ])),
+                ..Fake::default()
+            });
+            let provider = Ocstat::with_transport(Box::new(fake));
+            let result = provider
+                .login(
+                    "example@example.invalid".into(),
+                    "TEST_PASSWORD_ONLY".into(),
+                )
+                .await;
+            if error == ProviderError::Authentication {
+                assert_eq!(result, Err(error));
+                assert!(provider.auth.lock().await.session.is_none());
+            } else {
+                assert_eq!(result.unwrap().observation, Err(error));
+            }
+            assert!(provider.auth.lock().await.context.is_none());
+        }
     }
     #[tokio::test]
     async fn reads_before_browser_login_never_contact_upstream() {
@@ -760,11 +875,11 @@ mod tests {
     #[test]
     fn discovery_never_guesses_between_multiple_devices() {
         assert_eq!(
-            decode_device(LIST, None, 1),
+            decode_fixture_device(LIST, None, 1),
             Err(ProviderError::MultipleDevices)
         );
         assert_eq!(
-            decode_device(br#"{"statu":true,"error_code":1,"devices":[]}"#, None, 1),
+            decode_fixture_device(br#"{"statu":true,"error_code":1,"devices":[]}"#, None, 1),
             Err(ProviderError::DeviceNotFound)
         );
     }
@@ -773,7 +888,7 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_slice(&single()).unwrap();
         value["devices"][0]["device_name"] = "  Living\nroom  ".into();
         let decode = |value: &serde_json::Value| {
-            decode_device(&serde_json::to_vec(value).unwrap(), None, 1).unwrap()
+            decode_fixture_device(&serde_json::to_vec(value).unwrap(), None, 1).unwrap()
         };
         assert_eq!(decode(&value).device_name.as_deref(), Some("Livingroom"));
         value["devices"][0]["device_name"] = "x".repeat(200).into();
@@ -797,16 +912,16 @@ mod tests {
             br#"{"statu":true,"error_code":0,"user":{"id":7,"token":""}}"#,
         ] {
             assert!(decode_login(body).is_err());
-            assert!(decode_device(body, Some("TESTDEVICE01"), 1).is_err());
+            assert!(decode_fixture_device(body, Some("TESTDEVICE01"), 1).is_err());
         }
         assert_eq!(
-            decode_device(LIST, Some("MISSING"), 1),
+            decode_fixture_device(LIST, Some("MISSING"), 1),
             Err(ProviderError::DeviceNotFound)
         );
         let mut value: serde_json::Value = serde_json::from_slice(LIST).unwrap();
         value["error_code"] = 0.into();
         assert_eq!(
-            decode_device(
+            decode_fixture_device(
                 &serde_json::to_vec(&value).unwrap(),
                 Some("TESTDEVICE01"),
                 1
@@ -814,29 +929,29 @@ mod tests {
             Err(ProviderError::InvalidResponse)
         );
         value["error_code"] = 1.into();
-        value["devices"][1]["current_temprature"] = "21.5".into();
+        value["devices"][1]["inside_temparature"] = "21.5".into();
         assert_eq!(
-            decode_device(
+            decode_fixture_device(
                 &serde_json::to_vec(&value).unwrap(),
                 Some("TESTDEVICE01"),
                 1
             ),
             Err(ProviderError::InvalidResponse)
         );
-        value["devices"][1]["current_temprature"] = "321".into();
+        value["devices"][1]["inside_temparature"] = "321".into();
         value["devices"][1]["online"] = false.into();
-        let device = decode_device(
+        let device = decode_fixture_device(
             &serde_json::to_vec(&value).unwrap(),
             Some("TESTDEVICE01"),
             1,
         )
         .unwrap();
-        assert_eq!(device.target_temperature, Temperature(321)); // Not constrained to simulator limits.
+        assert_eq!(device.room_temperature, Temperature(321)); // Not constrained to simulator limits.
         assert!(!device.online);
         let duplicate = value["devices"][1].clone();
         value["devices"].as_array_mut().unwrap().push(duplicate);
         assert_eq!(
-            decode_device(
+            decode_fixture_device(
                 &serde_json::to_vec(&value).unwrap(),
                 Some("TESTDEVICE01"),
                 1

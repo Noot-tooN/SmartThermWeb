@@ -57,9 +57,15 @@
           case 'login_unavailable':
             error = 'You are already signed in. Refresh the page.';
             break;
-          default:
+          case 'cloud_unavailable':
             error =
-              'Could not start login. Refresh this local page and try again.';
+              'OCSTAT is unavailable or returned an unreadable response. Try again shortly.';
+            break;
+          case 'invalid_origin':
+            error = 'Open the configured heating address to sign in.';
+            break;
+          default:
+            error = 'Could not sign in. Try again shortly.';
         }
         return;
       }
